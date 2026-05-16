@@ -1,0 +1,70 @@
+﻿import xlwings as xw
+import time
+
+# Define the full path to your Excel file
+file_path = r"C:\Users\Prakhar\Desktop\AICode\prediction.xlsx"
+
+# Launch Excel and open the workbook
+wb = xw.Book(file_path)
+
+# Reference the sheets
+data_dump_sheet = wb.sheets['data dump']
+entry_sheet = wb.sheets['Entry']
+data_sheet = wb.sheets['Data']
+
+# Store previous values for comparison
+# Initialize previous values from the same sheet/ranges we will later read
+# (use `data_dump_sheet` so comparisons are consistent)
+
+
+# Refresh every 5 minutes
+while True:
+    print("🔄 Refreshing data...")
+    wb.api.RefreshAll()
+    time.sleep(10)  # Wait for refresh to complete
+    prev_values = {
+        'B6': data_sheet.range('D6').value,
+        'B7': data_sheet.range('D7').value,
+        'V6': data_sheet.range('X6').value,
+        'V7': data_sheet.range('X7').value
+    }
+    # Read current values
+    current_values = {
+        'B6': data_dump_sheet.range('B6').value,
+        'B7': data_dump_sheet.range('B7').value,
+        'V6': data_dump_sheet.range('V6').value,
+        'V7': data_dump_sheet.range('V7').value
+    }
+
+    # Count how many values have changed (treat any change as an event)
+    changes = sum(1 for key in current_values if current_values.get(key) != prev_values.get(key))
+
+    # Trigger when at least one monitored value changes
+    if changes >= 1:
+        print(f"✅ Detected {changes} changes among B6, B7, V6, V7")
+
+        # 🔢 Update A6 in Entry sheet
+        current_a6 = entry_sheet.range('A6').value
+        if isinstance(current_a6, (int, float)):
+            new_a6 = current_a6 + 1 if current_a6 < 8 else 1
+        else:
+            new_a6 = 1
+        entry_sheet.range('A6').value = new_a6
+        print(f"A6 updated to: {new_a6}")
+
+        # 📋 Copy D2:X81 → D12:X91 in Data sheet
+        data_sheet.range('D12:X171').value = data_sheet.range('D2:X161').value
+        print("📁 D2:X81 copied to D12:X91")
+
+        # 📋 Copy B2:V11 from Data Dump → D2:X11 in Data sheet
+        data_sheet.range('D2:X11').value = data_dump_sheet.range('B2:V11').value
+        print("📁 B2:V11 copied to D2:X11")
+
+        # Update previous values
+        prev_values = current_values.copy()
+    else:
+        print(f"⚠️ Only {changes} change(s) detected — skipping copy/update")
+
+    # ⏳ Wait until next refresh cycle
+    print("⏱️ Waiting for next refresh...\n")
+    time.sleep(30)

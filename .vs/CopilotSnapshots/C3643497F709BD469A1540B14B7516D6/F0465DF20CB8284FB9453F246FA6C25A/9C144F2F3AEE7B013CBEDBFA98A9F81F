@@ -1,0 +1,130 @@
+﻿import streamlit as st
+
+# Try to import the official Google generative AI client and handle if it's not installed.
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+# Try optional parsers
+try:
+    import docx
+except Exception:
+    docx = None
+
+try:
+    import PyPDF2
+except Exception:
+    PyPDF2 = None
+
+st.set_page_config(page_title="Gemini Q&A", page_icon="🤖")
+
+st.title("🤖 Gemini Q&A App")
+st.write("Ask questions using Google Gemini")
+
+# Sidebar for API Key
+st.sidebar.header("🔐 Configuration")
+api_key = st.sidebar.text_input(
+    "Enter your Gemini API Key",
+    type="password",
+    help="Get it from Google AI Studio"
+)
+
+# Main input
+question = st.text_area(
+    "💬 Your Question",
+    placeholder="Ask anything...",
+    height=120
+)
+
+# File uploader
+uploaded_file = st.file_uploader("📄 Upload a document to provide context (txt, pdf, docx)", type=["txt", "pdf", "docx"])
+
+
+def _extract_text_from_file(uploaded) -> str:
+    if uploaded is None:
+        return ""
+    name = uploaded.name.lower() if hasattr(uploaded, "name") else ""
+    # TXT
+    if name.endswith(".txt"):
+        raw = uploaded.read()
+        return raw.decode("utf-8", errors="replace")
+
+    # DOCX
+    if name.endswith(".docx"):
+        if docx is None:
+            raise RuntimeError("python-docx is required to read .docx files. Install with `pip install python-docx`.")
+        # python-docx accepts a file-like object
+        uploaded.seek(0)
+        document = docx.Document(uploaded)
+        paragraphs = [p.text for p in document.paragraphs]
+        return "\n".join(paragraphs)
+
+    # PDF
+    if name.endswith(".pdf"):
+        if PyPDF2 is None:
+            raise RuntimeError("PyPDF2 is required to read PDF files. Install with `pip install PyPDF2`.")
+        uploaded.seek(0)
+        reader = PyPDF2.PdfReader(uploaded)
+        texts = []
+        for page in reader.pages:
+            try:
+                texts.append(page.extract_text() or "")
+            except Exception:
+                # ignore page extraction errors
+                continue
+        return "\n".join(texts)
+
+    # Fallback: try to decode as text
+    uploaded.seek(0)
+    raw = uploaded.read()
+    try:
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return str(raw)
+
+
+ask_button = st.button("Ask Gemini")
+
+if ask_button:
+    if not api_key:
+        st.error("Please enter your Gemini API key.")
+    elif not question.strip() and uploaded_file is None:
+        st.error("Please enter a question or upload a document to ask about.")
+    else:
+        try:
+            # Build context from uploaded file if present
+            doc_text = ""
+            if uploaded_file is not None:
+                with st.spinner("Extracting text from uploaded file..."):
+                    doc_text = _extract_text_from_file(uploaded_file)
+                    # Truncate to avoid excessively long prompts
+                    if len(doc_text) > 4000:
+                        doc_text = doc_text[:3000] + "\n\n... (truncated) ...\n\n" + doc_text[-1000:]
+
+            # Prepare final prompt: include document context when available
+            if doc_text:
+                combined_prompt = f"Context:\n{doc_text}\n\nQuestion:\n{question}"
+            else:
+                combined_prompt = question
+
+            # Configure Gemini
+            if genai is None:
+                raise RuntimeError("`google-generativeai` package is not installed. Install with `pip install google-generativeai`.")
+
+            genai.configure(api_key=api_key)
+
+            # Load model and generate response
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            response = model.generate_content(combined_prompt)
+
+            st.subheader("📌 Gemini Response")
+            # Prefer .text attribute
+            answer = getattr(response, "text", None)
+            if not answer:
+                # fallback to str(response)
+                answer = str(response)
+            st.write(answer)
+
+        except Exception as e:
+            st.error(f"Error: {str(e)}")

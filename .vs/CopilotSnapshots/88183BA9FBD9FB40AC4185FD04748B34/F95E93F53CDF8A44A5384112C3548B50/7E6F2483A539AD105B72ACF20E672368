@@ -1,0 +1,736 @@
+﻿"""
+Voice Cloning App — Coqui TTS + Streamlit
+Clones a speaker's voice from a WAV sample and synthesizes arbitrary text.
+"""
+
+import os
+import time
+import tempfile
+import streamlit as st
+import numpy as np
+
+# ── Workaround for transformers compatibility ─────────────────────────────────
+# This patches transformers to add missing isin_mps_friendly function
+try:
+    from transformers.pytorch_utils import isin_mps_friendly
+except ImportError:
+    import transformers.pytorch_utils as pytorch_utils
+    def isin_mps_friendly(obj):
+        """Check if tensor is MPS-friendly (placeholder for newer transformers)."""
+        return False
+    pytorch_utils.isin_mps_friendly = isin_mps_friendly
+
+# ── Page config ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="VoiceForge · AI Voice Cloning",
+    page_icon="🎙️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:wght@300;400;500&display=swap');
+
+:root {
+    --bg: #0b0c10;
+    --surface: #13151c;
+    --card: #1a1d27;
+    --border: #2a2d3e;
+    --accent: #7c6af7;
+    --accent2: #f76a8a;
+    --accent3: #6af7c8;
+    --text: #e8eaf0;
+    --muted: #6b7080;
+    --success: #3dffa0;
+    --warn: #ffd166;
+}
+
+html, body, [class*="css"] {
+    background-color: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: 'DM Mono', monospace;
+}
+
+/* Hide Streamlit chrome */
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding: 2rem 3rem 4rem; max-width: 1100px; }
+
+/* ── Hero ── */
+.hero {
+    text-align: center;
+    padding: 3rem 0 2rem;
+    position: relative;
+}
+.hero-badge {
+    display: inline-block;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: var(--accent3);
+    background: rgba(106,247,200,0.08);
+    border: 1px solid rgba(106,247,200,0.25);
+    padding: 0.3em 1em;
+    border-radius: 2px;
+    margin-bottom: 1.5rem;
+}
+.hero h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(2.8rem, 6vw, 5rem);
+    font-weight: 800;
+    line-height: 1.05;
+    margin: 0 0 0.5rem;
+    background: linear-gradient(135deg, #ffffff 0%, var(--accent) 60%, var(--accent2) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.hero p {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin: 0;
+    letter-spacing: 0.02em;
+}
+
+/* ── Cards ── */
+.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.8rem;
+    margin-bottom: 1.2rem;
+    position: relative;
+    overflow: hidden;
+}
+.card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    opacity: 0.7;
+}
+.card-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.card-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+}
+
+/* ── Steps ── */
+.steps {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    flex-wrap: wrap;
+}
+.step {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.72rem;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+}
+.step-num {
+    width: 22px; height: 22px;
+    background: var(--border);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: var(--muted);
+    flex-shrink: 0;
+}
+.step.active .step-num {
+    background: var(--accent);
+    color: #fff;
+}
+.step.done .step-num {
+    background: var(--success);
+    color: #000;
+}
+.step-arrow { color: var(--border); font-size: 0.8rem; }
+
+/* ── Buttons ── */
+.stButton > button {
+    background: linear-gradient(135deg, var(--accent), #5a48e0) !important;
+    color: #fff !important;
+    border: none !important;
+    border-radius: 6px !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.8rem !important;
+    letter-spacing: 0.08em !important;
+    padding: 0.65rem 1.8rem !important;
+    cursor: pointer !important;
+    transition: all 0.2s ease !important;
+    text-transform: uppercase !important;
+}
+.stButton > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 8px 24px rgba(124,106,247,0.4) !important;
+}
+
+/* ── File uploader ── */
+[data-testid="stFileUploader"] {
+    background: var(--surface) !important;
+    border: 2px dashed var(--border) !important;
+    border-radius: 8px !important;
+    padding: 1rem !important;
+}
+[data-testid="stFileUploader"]:hover {
+    border-color: var(--accent) !important;
+}
+
+/* ── Text area / input ── */
+.stTextArea textarea, .stTextInput input {
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text) !important;
+    border-radius: 6px !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.85rem !important;
+}
+.stTextArea textarea:focus, .stTextInput input:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 2px rgba(124,106,247,0.2) !important;
+}
+
+/* ── Slider ── */
+.stSlider [data-testid="stSlider"] > div > div > div {
+    background: var(--accent) !important;
+}
+
+/* ── Select box ── */
+.stSelectbox > div > div {
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text) !important;
+    border-radius: 6px !important;
+}
+
+/* ── Metrics ── */
+.metric-row {
+    display: flex;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+.metric {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    text-align: center;
+}
+.metric-val {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--accent3);
+}
+.metric-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 0.25rem;
+}
+
+/* ── Status badges ── */
+.badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 0.2em 0.7em;
+    border-radius: 2px;
+    font-family: 'DM Mono', monospace;
+}
+.badge-ok { background: rgba(61,255,160,0.12); color: var(--success); border: 1px solid rgba(61,255,160,0.3); }
+.badge-warn { background: rgba(255,209,102,0.12); color: var(--warn); border: 1px solid rgba(255,209,102,0.3); }
+.badge-err { background: rgba(247,106,138,0.12); color: var(--accent2); border: 1px solid rgba(247,106,138,0.3); }
+
+/* ── Audio player ── */
+audio {
+    width: 100% !important;
+    margin-top: 0.5rem;
+    border-radius: 6px;
+    filter: invert(1) hue-rotate(180deg);
+}
+
+/* ── Waveform visualizer ── */
+.waveform-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    margin: 0.8rem 0;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+/* ── Divider ── */
+hr { border-color: var(--border) !important; margin: 2rem 0 !important; }
+
+/* ── Expander ── */
+.streamlit-expanderHeader {
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.8rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── Session state defaults ────────────────────────────────────────────────────
+for key, val in {
+    "model_loaded": False,
+    "tts_engine": None,
+    "speaker_wav_path": None,
+    "audio_info": None,
+    "output_path": None,
+    "synthesis_time": None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+
+# ── Workaround for transformers compatibility ─────────────────────────────────
+def _patch_transformers():
+    """Patch transformers to add missing isin_mps_friendly function if needed."""
+    try:
+        from transformers.pytorch_utils import isin_mps_friendly
+    except ImportError:
+        import transformers.pytorch_utils as pytorch_utils
+        # Add the missing function for newer transformers versions
+        def isin_mps_friendly(obj):
+            """Check if tensor is MPS-friendly (placeholder)."""
+            return False
+        pytorch_utils.isin_mps_friendly = isin_mps_friendly
+
+
+# ── Helper: load TTS engine ───────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def load_tts_model(model_name: str):
+    """Load Coqui TTS model. Cached across reruns."""
+    _patch_transformers()  # Patch transformers compatibility
+    from TTS.api import TTS
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tts = TTS(model_name=model_name, progress_bar=False).to(device)
+    return tts, device
+
+
+def get_audio_info(wav_path: str) -> dict:
+    """Return duration, sample rate, and channel count of a WAV file."""
+    import soundfile as sf
+    data, sr = sf.read(wav_path)
+    duration = len(data) / sr
+    channels = 1 if data.ndim == 1 else data.shape[1]
+    return {"duration": duration, "sr": sr, "channels": channels, "samples": len(data)}
+
+
+def preprocess_audio(uploaded_file) -> str:
+    """
+    Save uploaded file to a temp path.
+    Resample to 16 kHz mono if needed (required by XTTS encoder).
+    Returns path to processed WAV.
+    """
+    import soundfile as sf
+    import librosa
+
+    tmp_in = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_in.write(uploaded_file.read())
+    tmp_in.flush()
+    tmp_in.close()
+
+    audio, sr = librosa.load(tmp_in.name, sr=None, mono=True)
+    if sr != 16000:
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+    
+    out_path = tmp_in.name.replace(".wav", "_processed.wav")
+    sf.write(out_path, audio, 16000, subtype="PCM_16")
+    os.unlink(tmp_in.name)
+    return out_path
+
+
+# ── UI: Hero ──────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero">
+    <div class="hero-badge">⬡ Coqui TTS · XTTS-v2 · Open Source</div>
+    <h1>VoiceForge</h1>
+    <p>Upload a voice sample · Clone it · Synthesize anything</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Pipeline steps indicator ──────────────────────────────────────────────────
+step1 = "done" if st.session_state.speaker_wav_path else "active"
+step2 = "done" if st.session_state.model_loaded else ("active" if st.session_state.speaker_wav_path else "")
+step3 = "active" if st.session_state.model_loaded else ""
+step4 = "done" if st.session_state.output_path else ""
+
+st.markdown(f"""
+<div class="steps">
+    <div class="step {step1}">
+        <div class="step-num">{'✓' if step1=='done' else '1'}</div>
+        Upload Audio
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step {step2}">
+        <div class="step-num">{'✓' if step2=='done' else '2'}</div>
+        Load Model
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step {step3}">
+        <div class="step-num">3</div>
+        Enter Text
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step {step4}">
+        <div class="step-num">{'✓' if step4=='done' else '4'}</div>
+        Play & Download
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ── Layout: two columns ───────────────────────────────────────────────────────
+left, right = st.columns([1, 1], gap="large")
+
+# ════════════════════════════════════════════════════════════════════════
+# LEFT COLUMN — Upload + Model
+# ════════════════════════════════════════════════════════════════════════
+with left:
+    # ── 1. Audio Upload ──────────────────────────────────────────────────
+    st.markdown("""
+    <div class="card">
+        <div class="card-label">🎙 Step 1 — Voice Sample</div>
+    """, unsafe_allow_html=True)
+
+    uploaded = st.file_uploader(
+        "Upload a WAV file (mono, any sample rate — auto-resampled to 16 kHz)",
+        type=["wav"],
+        help="Recommended: 1–10 min of clear speech, minimal background noise.",
+        label_visibility="collapsed",
+    )
+
+    if uploaded:
+        with st.spinner("Processing audio..."):
+            proc_path = preprocess_audio(uploaded)
+            st.session_state.speaker_wav_path = proc_path
+            info = get_audio_info(proc_path)
+            st.session_state.audio_info = info
+
+        dur = info["duration"]
+        dur_str = f"{int(dur//60)}m {int(dur%60)}s"
+        quality = "Excellent" if dur >= 60 else ("Good" if dur >= 20 else "Short")
+        badge = "badge-ok" if dur >= 20 else "badge-warn"
+
+        st.markdown(f"""
+        <div class="metric-row">
+            <div class="metric">
+                <div class="metric-val">{dur_str}</div>
+                <div class="metric-label">Duration</div>
+            </div>
+            <div class="metric">
+                <div class="metric-val">{info['sr']//1000}kHz</div>
+                <div class="metric-label">Sample Rate</div>
+            </div>
+            <div class="metric">
+                <div class="metric-val">{'Mono' if info['channels']==1 else 'Stereo'}</div>
+                <div class="metric-label">Channels</div>
+            </div>
+        </div>
+        <span class="badge {badge}">Quality: {quality}</span>
+        """, unsafe_allow_html=True)
+
+        st.audio(proc_path, format="audio/wav")
+
+        if dur < 10:
+            st.warning("⚠️ Very short sample — voice quality may be poor. Aim for 30 s+.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── 2. Model Selection + Loading ─────────────────────────────────────
+    st.markdown("""
+    <div class="card">
+        <div class="card-label">🧠 Step 2 — TTS Model</div>
+    """, unsafe_allow_html=True)
+
+    MODEL_OPTIONS = {
+        "XTTS-v2 (Best quality, ~2 GB)": "tts_models/multilingual/multi-dataset/xtts_v2",
+        "XTTS-v1 (Faster, ~1.5 GB)":     "tts_models/multilingual/multi-dataset/xtts_v1.1",
+        "YourTTS (Lightweight, ~500 MB)": "tts_models/multilingual/multi-dataset/your_tts",
+    }
+
+    chosen_label = st.selectbox(
+        "Model",
+        list(MODEL_OPTIONS.keys()),
+        help="XTTS-v2 gives the best voice similarity. YourTTS is faster on CPU.",
+        label_visibility="visible",
+    )
+    chosen_model = MODEL_OPTIONS[chosen_label]
+
+    LANG_MAP = {
+        "English": "en", "Spanish": "es", "French": "fr",
+        "German": "de", "Italian": "it", "Portuguese": "pt",
+        "Polish": "pl", "Turkish": "tr", "Russian": "ru",
+        "Dutch": "nl", "Czech": "cs", "Arabic": "ar",
+        "Chinese (Simplified)": "zh-cn", "Japanese": "ja",
+        "Korean": "ko", "Hungarian": "hu", "Hindi": "hi",
+    }
+
+    selected_lang = st.selectbox("Output language", list(LANG_MAP.keys()), index=0)
+    language = LANG_MAP[selected_lang]
+
+    load_btn = st.button(
+        "⚡ Load Model",
+        disabled=not st.session_state.speaker_wav_path,
+        use_container_width=True,
+    )
+
+    if load_btn:
+        with st.spinner(f"Downloading & loading `{chosen_label}` — first run may take a minute..."):
+            try:
+                tts, device = load_tts_model(chosen_model)
+                st.session_state.tts_engine = tts
+                st.session_state.model_loaded = True
+                st.session_state.chosen_model = chosen_model
+                st.session_state.language = language
+                st.markdown(f'<span class="badge badge-ok">✓ Model ready · {device.upper()}</span>', unsafe_allow_html=True)
+                st.success(f"Model loaded on **{device.upper()}**!")
+            except Exception as e:
+                st.error(f"Failed to load model: {e}")
+
+    if st.session_state.model_loaded:
+        st.markdown('<span class="badge badge-ok">✓ Model ready</span>', unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# RIGHT COLUMN — Synthesis + Output
+# ════════════════════════════════════════════════════════════════════════
+with right:
+    # ── 3. Text Input + Synthesis ────────────────────────────────────────
+    st.markdown("""
+    <div class="card">
+        <div class="card-label">✍️ Step 3 — Text to Synthesize</div>
+    """, unsafe_allow_html=True)
+
+    sample_texts = [
+        "Hello, welcome to my AI voice demo. This voice was cloned using Coqui TTS.",
+        "This is a test of voice cloning technology. The results are quite remarkable.",
+        "Artificial intelligence is transforming the way we interact with computers.",
+        "The quick brown fox jumps over the lazy dog — a perfect pangram for testing.",
+        "— Custom text —",
+    ]
+
+    preset = st.selectbox("Quick presets", sample_texts, index=4, label_visibility="visible")
+    default_text = "" if preset == "— Custom text —" else preset
+
+    text_input = st.text_area(
+        "Text",
+        value=default_text,
+        height=140,
+        placeholder="Type or paste any text here...\n\nTip: 1–3 sentences work best.",
+        label_visibility="collapsed",
+    )
+
+    char_count = len(text_input)
+    word_count = len(text_input.split()) if text_input.strip() else 0
+    st.caption(f"Characters: {char_count} · Words: {word_count}")
+
+    # Advanced options
+    with st.expander("⚙️ Advanced synthesis options"):
+        speed = st.slider("Speed", 0.5, 2.0, 1.0, 0.05,
+                          help="1.0 = natural speed")
+        temperature = st.slider("Temperature", 0.1, 1.0, 0.7, 0.05,
+                                help="Higher = more expressive but less stable")
+        top_k = st.slider("Top-K", 10, 100, 50, 5,
+                           help="Token sampling breadth")
+        top_p = st.slider("Top-P", 0.5, 1.0, 0.85, 0.05,
+                           help="Nucleus sampling threshold")
+        length_penalty = st.slider("Length Penalty", 0.5, 2.0, 1.0, 0.1)
+        repetition_penalty = st.slider("Repetition Penalty", 1.0, 10.0, 5.0, 0.5,
+                                       help="Reduces repeated phrases")
+
+    synthesize_btn = st.button(
+        "🎙 Synthesize Voice",
+        disabled=not (st.session_state.model_loaded and text_input.strip()),
+        use_container_width=True,
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Synthesis ────────────────────────────────────────────────────────
+    if synthesize_btn and text_input.strip():
+        out_path = os.path.join(tempfile.gettempdir(), "cloned_output.wav")
+        tts = st.session_state.tts_engine
+        lang = getattr(st.session_state, "language", "en")
+
+        progress = st.progress(0, text="Extracting speaker embedding...")
+        t0 = time.time()
+
+        try:
+            progress.progress(20, text="Encoding speaker voice...")
+
+            # Build kwargs based on model capabilities
+            model_name = getattr(st.session_state, "chosen_model", "")
+            is_xtts = "xtts" in model_name.lower()
+            is_yourtts = "your_tts" in model_name.lower()
+
+            progress.progress(45, text="Running TTS synthesis...")
+
+            if is_xtts:
+                tts.tts_to_file(
+                    text=text_input,
+                    speaker_wav=st.session_state.speaker_wav_path,
+                    language=lang,
+                    file_path=out_path,
+                    speed=speed,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    length_penalty=length_penalty,
+                    repetition_penalty=repetition_penalty,
+                )
+            elif is_yourtts:
+                tts.tts_to_file(
+                    text=text_input,
+                    speaker_wav=st.session_state.speaker_wav_path,
+                    language=lang,
+                    file_path=out_path,
+                )
+            else:
+                tts.tts_to_file(
+                    text=text_input,
+                    speaker_wav=st.session_state.speaker_wav_path,
+                    language=lang,
+                    file_path=out_path,
+                )
+
+            progress.progress(90, text="Saving audio...")
+            elapsed = time.time() - t0
+            st.session_state.output_path = out_path
+            st.session_state.synthesis_time = elapsed
+            progress.progress(100, text="Done!")
+            time.sleep(0.3)
+            progress.empty()
+
+        except Exception as e:
+            progress.empty()
+            st.error(f"Synthesis failed: {e}")
+
+    # ── 4. Output ────────────────────────────────────────────────────────
+    if st.session_state.output_path and os.path.exists(st.session_state.output_path):
+        st.markdown("""
+        <div class="card">
+            <div class="card-label">🔊 Step 4 — Output</div>
+        """, unsafe_allow_html=True)
+
+        out_info = get_audio_info(st.session_state.output_path)
+        dur_out = out_info["duration"]
+        synth_t = st.session_state.synthesis_time or 0
+        rtf = synth_t / dur_out if dur_out > 0 else 0
+
+        st.markdown(f"""
+        <div class="metric-row">
+            <div class="metric">
+                <div class="metric-val">{dur_out:.1f}s</div>
+                <div class="metric-label">Output Duration</div>
+            </div>
+            <div class="metric">
+                <div class="metric-val">{synth_t:.1f}s</div>
+                <div class="metric-label">Synth Time</div>
+            </div>
+            <div class="metric">
+                <div class="metric-val">{rtf:.2f}x</div>
+                <div class="metric-label">RTF</div>
+            </div>
+        </div>
+        <span class="badge badge-ok">✓ Synthesis complete</span>
+        """, unsafe_allow_html=True)
+
+        st.success("Voice cloning complete!")
+        st.audio(st.session_state.output_path, format="audio/wav")
+
+        with open(st.session_state.output_path, "rb") as f:
+            st.download_button(
+                label="⬇ Download cloned_output.wav",
+                data=f.read(),
+                file_name="cloned_output.wav",
+                mime="audio/wav",
+                use_container_width=True,
+            )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ── Footer / Info ─────────────────────────────────────────────────────────────
+st.markdown("<hr>", unsafe_allow_html=True)
+
+with st.expander("ℹ️ How it works · Technical details"):
+    st.markdown("""
+    **Pipeline overview:**
+
+    ```
+    WAV Upload → Preprocess (16kHz mono) → Speaker Embedding
+        ↓
+    XTTS-v2 Encoder (GE2E / d-vector)
+        ↓
+    Text → Phonemes → Mel Spectrogram → HiFi-GAN Vocoder
+        ↓
+    cloned_output.wav
+    ```
+
+    **Model: XTTS-v2** (Coqui TTS)
+    - Zero-shot voice cloning — no fine-tuning required
+    - Supports 17 languages
+    - ~2 GB model weights; runs on GPU (CUDA) or CPU
+    - Speaker embedding extracted via GE2E-style encoder
+    - Vocoder: HiFi-GAN (high-fidelity waveform synthesis)
+
+    **Tips for best results:**
+    - Use 30 s – 3 min of clean speech (no music/noise)
+    - Consistent speaking pace and tone
+    - Avoid recordings with heavy compression or codec artifacts
+    - XTTS-v2 works best at ≥ 22 050 Hz source audio (auto-resampled)
+
+    **GPU memory:** ~4 GB VRAM for XTTS-v2 · ~2 GB for YourTTS
+    """)
+
+with st.expander("🛠️ Troubleshooting"):
+    st.markdown("""
+    | Issue | Fix |
+    |-------|-----|
+    | `CUDA out of memory` | Switch to YourTTS or use CPU |
+    | Robotic/garbled output | Increase sample duration; reduce Temperature |
+    | Wrong language accent | Set Output Language to match your audio |
+    | Model download fails | Check internet; models cached in `~/.local/share/tts` |
+    | `soundfile` error | Install `libsndfile1` on Linux |
+    """)
+
+st.markdown("""
+<div style='text-align:center; margin-top:3rem; font-size:0.65rem; color:#3a3d50; letter-spacing:0.15em;'>
+    VOICEFORGE · BUILT WITH COQUI TTS · XTTS-V2 · STREAMLIT
+</div>
+""", unsafe_allow_html=True)

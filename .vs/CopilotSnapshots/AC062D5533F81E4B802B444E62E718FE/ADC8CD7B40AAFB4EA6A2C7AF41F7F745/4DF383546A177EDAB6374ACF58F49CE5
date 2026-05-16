@@ -1,0 +1,294 @@
+﻿"""
+Automate downloading the option-chain CSV from NSE India site by clicking the UI download link.
+
+Usage:
+  python download_nse_csv.py --download-dir ./downloads --output out.csv [--headless]
+
+Requirements:
+  pip install selenium webdriver-manager
+
+Notes:
+- Chrome/Chromium must be installed. webdriver-manager will fetch chromedriver.
+- If site structure changes, adjust the XPath selectors in `find_and_click_download`.
+- If NSE blocks automated browsers, run without headless and consider adding a real profile/user-data-dir.
+"""
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import ElementClickInterceptedException, NoSuchElementException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+from openpyxl import load_workbook
+from openpyxl import Workbook
+
+
+NSE_URL = "https://www.nseindia.com/option-chain"
+
+
+def make_driver(download_dir: str, headless: bool = False):
+    download_dir = str(Path(download_dir).resolve())
+    options = webdriver.ChromeOptions()
+
+    # set a common user-agent to reduce detection
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+    )
+
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    # stability options
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+
+    if headless:
+        # use new headless flag for modern Chrome
+        options.add_argument("--headless=new")
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(60)
+    return driver
+
+
+def find_and_click_download(driver, image_name: str = None) -> bool:
+    """Try multiple selectors to find and click a download control on the page.
+    If `image_name` is provided, try to find an element that uses that image
+    (in an <img> src or in style/background) and click it (or its parent link).
+    Returns True if a click was performed.
+    """
+    wait = WebDriverWait(driver, 30)
+
+    # Wait for body to be present
+    try:
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    except Exception:
+        pass
+
+    # Attempt to dismiss cookie consent or overlays if present
+    overlay_xpaths = [
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree')]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'ok')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]",
+    ]
+    for xp in overlay_xpaths:
+        try:
+            elems = driver.find_elements(By.XPATH, xp)
+            for el in elems:
+                if el.is_displayed():
+                    try:
+                        el.click()
+                        time.sleep(1)
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", el)
+        except Exception:
+            continue
+
+    # Candidate xpaths for download link/button
+    candidate_xpaths = [
+        # links/buttons with 'csv' in text
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'csv') and (contains(@href, '.csv') or contains(@href, 'download'))]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'csv')]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'download') and contains(@href, '.csv') ]",
+        "//a[contains(@href, '.csv') ]",
+        "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'download') ]",
+        "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'download') ]",
+    ]
+
+    # If user provided an image name, try to find image elements first
+    if image_name:
+        img_xpaths = [
+            f"//img[contains(@src, '{image_name}') ]",
+            f"//img[contains(translate(@alt, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{Path(image_name).stem.lower()}') ]",
+            f"//*[contains(@style, '{image_name}') ]",
+            f"//a[img[contains(@src, '{image_name}')]]",
+            f"//button[img[contains(@src, '{image_name}')]]",
+        ]
+        for xp in img_xpaths:
+            try:
+                elems = driver.find_elements(By.XPATH, xp)
+                for el in elems:
+                    try:
+                        if not el.is_displayed():
+                            continue
+                        # prefer clicking parent anchor if present
+                        try:
+                            parent_a = el.find_element(By.XPATH, './ancestor::a[1]')
+                        except Exception:
+                            parent_a = None
+                        target = parent_a if parent_a is not None else el
+                        driver.execute_script("arguments[0].scrollIntoView(true);", target)
+                        time.sleep(0.5)
+                        try:
+                            target.click()
+                        except ElementClickInterceptedException:
+                            driver.execute_script("arguments[0].click();", target)
+                        return True
+                    except Exception:
+                        continue
+            except NoSuchElementException:
+                continue
+
+    for xp in candidate_xpaths:
+        try:
+            elems = driver.find_elements(By.XPATH, xp)
+            for el in elems:
+                try:
+                    if not el.is_displayed():
+                        continue
+                    # scroll into view and click
+                    driver.execute_script("arguments[0].scrollIntoView(true);", el)
+                    time.sleep(0.5)
+                    try:
+                        el.click()
+                    except ElementClickInterceptedException:
+                        driver.execute_script("arguments[0].click();", el)
+                    return True
+                except Exception:
+                    continue
+        except NoSuchElementException:
+            continue
+    return False
+
+
+def wait_for_download(download_dir: str, timeout: int = 60):
+    download_dir = Path(download_dir)
+    start = time.time()
+    seen = set(download_dir.iterdir()) if download_dir.exists() else set()
+    while time.time() - start < timeout:
+        time.sleep(1)
+        files = set(download_dir.iterdir()) if download_dir.exists() else set()
+        new_files = files - seen
+        candidates = [f for f in new_files if not f.name.endswith('.crdownload') and not f.name.endswith('.part')]
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            path = candidates[0]
+            # wait for size to stabilize
+            prev_size = -1
+            stable_count = 0
+            while time.time() - start < timeout:
+                size = path.stat().st_size
+                if size == prev_size:
+                    stable_count += 1
+                    if stable_count >= 3:
+                        return path
+                else:
+                    prev_size = size
+                    stable_count = 0
+                time.sleep(0.5)
+        for f in files:
+            if f.name.endswith('.crdownload'):
+                continue
+            if time.time() - f.stat().st_mtime > 1:
+                return f
+    raise TimeoutError(f"No downloaded file appeared in {download_dir} within {timeout}s")
+
+
+def main(download_dir: str, output_path: str, headless: bool = False, image: str = None):
+    download_dir = Path(download_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    driver = make_driver(str(download_dir), headless=headless)
+    try:
+        print(f"Opening {NSE_URL} ...")
+        driver.get(NSE_URL)
+        # wait for dynamic content
+        time.sleep(5)
+
+        clicked = find_and_click_download(driver, image_name=image)
+        if not clicked:
+            print("Could not find a download control on the page. Try running without headless mode or adjust selectors.")
+            return 1
+
+        print("Clicked download; waiting for file to appear in download directory...")
+        downloaded = wait_for_download(download_dir, timeout=120)
+        print(f"Downloaded file: {downloaded}")
+
+        # If the downloaded file is not CSV, but Excel, you could convert here.
+        # For now, move/rename downloaded file to output_path
+        dest = Path(output_path)
+        downloaded.replace(dest)
+        print(f"Saved downloaded file to: {dest}")
+
+        return dest
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def copy_sheet_data(source_path: Path, source_sheet: str, dest_path: Path, dest_sheet: str):
+    """Copy all values from source_sheet in source_path to dest_sheet in dest_path.
+    If dest_path doesn't exist it will be created. Existing dest_sheet will be replaced.
+    """
+    source_path = Path(source_path)
+    dest_path = Path(dest_path)
+
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file not found: {source_path}")
+
+    src_wb = load_workbook(source_path, data_only=True)
+    if source_sheet not in src_wb.sheetnames:
+        raise KeyError(f"Source sheet '{source_sheet}' not found in {source_path}")
+    src_ws = src_wb[source_sheet]
+
+    if dest_path.exists():
+        dst_wb = load_workbook(dest_path)
+        if dest_sheet in dst_wb.sheetnames:
+            dst_wb.remove(dst_wb[dest_sheet])
+        dst_ws = dst_wb.create_sheet(dest_sheet)
+    else:
+        dst_wb = Workbook()
+        # remove default sheet if present
+        if 'Sheet' in dst_wb.sheetnames and len(dst_wb.sheetnames) == 1:
+            dst_wb.remove(dst_wb['Sheet'])
+        dst_ws = dst_wb.create_sheet(dest_sheet)
+
+    for r_idx, row in enumerate(src_ws.iter_rows(values_only=True), start=1):
+        for c_idx, value in enumerate(row, start=1):
+            dst_ws.cell(row=r_idx, column=c_idx, value=value)
+
+    dst_wb.save(dest_path)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Download NSE option-chain CSV via UI click')
+    parser.add_argument('--download-dir', default='./downloads', help='directory where browser saves downloads')
+    parser.add_argument('--output', default='nsc_option_chain.xlsx', help='output path for downloaded file')
+    parser.add_argument('--headless', action='store_true', help='run browser headless')
+    parser.add_argument('--image', default=None, help='image filename to match on the page (e.g. abcd.png)')
+    parser.add_argument('--prediction', default='prediction.xlsx', help='prediction excel file to paste RAW sheet into')
+    parser.add_argument('--source-sheet', default='nsc_option_chain', help='sheet name in downloaded file to copy from')
+    parser.add_argument('--dest-sheet', default='RAW', help='sheet name in prediction file to copy into')
+    args = parser.parse_args()
+
+    try:
+        downloaded_path = main(args.download_dir, args.output, headless=args.headless, image=args.image)
+        # main returns the path to the saved file (Path) on success
+        if not isinstance(downloaded_path, Path):
+            # main returned exit code
+            sys.exit(downloaded_path)
+
+        print(f"Copying sheet '{args.source_sheet}' from {downloaded_path} to '{args.dest_sheet}' in {args.prediction}...")
+        copy_sheet_data(downloaded_path, args.source_sheet, Path(args.prediction), args.dest_sheet)
+        print("Copy complete.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)

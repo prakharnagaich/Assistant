@@ -1,0 +1,133 @@
+﻿import streamlit as st
+
+# Try to import the official Google generative AI client and handle if it's not installed.
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+# Hard-coded API key preserved from original file.
+API_KEY = "AIzaSyAHKPqEZ66TiHlG660ncBR-eIP-ehJo8OY"
+MODEL_NAME = "gemini-2.5-flash"
+
+
+def _to_text(value) -> str:
+    """Safely convert various response shapes to a UTF-8 string.
+
+    Decodes bytes with replacement on errors to avoid UnicodeDecodeError.
+    """
+    # bytes -> decode with replacement to avoid UnicodeDecodeError
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+
+    # already a string
+    if isinstance(value, str):
+        return value
+
+    # dict-like: try common text fields
+    if isinstance(value, dict):
+        for key in ("text", "content", "output", "outputText", "generated_text"):
+            v = value.get(key)
+            if v:
+                return _to_text(v)
+        # candidates / choices lists
+        for list_key in ("candidates", "choices", "outputs"):
+            lst = value.get(list_key)
+            if isinstance(lst, (list, tuple)) and lst:
+                first = lst[0]
+                if isinstance(first, dict):
+                    return _to_text(first)
+                return _to_text(first)
+
+    # list/tuple: try first element
+    if isinstance(value, (list, tuple)) and value:
+        return _to_text(value[0])
+
+    # Fallback to str, ensuring no decode errors when converting bytes-like inside
+    try:
+        return str(value)
+    except Exception:
+        return repr(value)
+
+
+def generate_ai_explanation(api_key: str, prompt: str) -> str:
+    if genai is None:
+        raise RuntimeError("`google-generativeai` package is not installed. Install with `pip install google-generativeai`.")
+
+    # Configure the client
+    genai.configure(api_key=api_key)
+
+    # Create model object (some client versions require different call patterns)
+    try:
+        model = genai.GenerativeModel(MODEL_NAME)
+    except Exception:
+        model = None
+
+    # Try multiple ways to generate content to be resilient across client versions
+    response = None
+    errors = []
+    if model is not None:
+        try:
+            response = model.generate_content(prompt)
+        except Exception as e:
+            errors.append(f"model.generate_content failed: {e}")
+        if response is None:
+            try:
+                # alternative method name
+                response = model.generate(prompt)
+            except Exception as e:
+                errors.append(f"model.generate failed: {e}")
+
+    if response is None:
+        try:
+            # newer client exposures
+            response = genai.generate(model=MODEL_NAME, prompt=prompt)
+        except Exception as e:
+            errors.append(f"genai.generate failed: {e}")
+
+    if response is None:
+        raise RuntimeError("All attempts to call the Generative API failed: " + "; ".join(errors))
+
+    # Extract text from common response shapes using safe converter
+    text = None
+
+    # prefer attribute .text
+    if hasattr(response, "text") and getattr(response, "text"):
+        text = _to_text(getattr(response, "text"))
+
+    # dict-like shape
+    if text is None and isinstance(response, dict):
+        text = _to_text(response)
+
+    # object with attributes: try common attributes
+    if text is None:
+        for attr in ("output", "content", "result"):
+            if hasattr(response, attr):
+                val = getattr(response, attr)
+                txt = _to_text(val)
+                if txt:
+                    text = txt
+                    break
+
+    if text is None:
+        # final fallback
+        text = _to_text(response)
+
+    return text
+
+
+st.set_page_config(page_title="Gemini — Simple QA", layout="centered")
+st.title("Gemini — Ask a Question")
+
+prompt = st.text_area("Enter your question", height=200)
+
+if st.button("Ask"):
+    if not prompt.strip():
+        st.error("Please enter a question.")
+    else:
+        try:
+            answer = generate_ai_explanation(API_KEY, prompt)
+            st.subheader("Answer")
+            st.write(answer)
+        except Exception as ex:
+            st.error(f"Request failed: {ex}")

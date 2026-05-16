@@ -1,0 +1,207 @@
+﻿import time
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+from openpyxl import load_workbook
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import ElementClickInterceptedException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+
+
+NSE_URL = "https://www.nseindia.com/option-chain"
+
+
+def make_driver(download_dir: str, headless: bool = True):
+    download_dir = str(Path(download_dir).resolve())
+    options = webdriver.ChromeOptions()
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+    )
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+    }
+    options.add_experimental_option("prefs", prefs)
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    if headless:
+        options.add_argument("--headless=new")
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(60)
+    return driver
+
+
+def find_and_click_by_image(driver, image_name: str) -> bool:
+    """Find an element on the page that uses image_name in src/style and click it.
+    Returns True if clicked.
+    """
+    wait = WebDriverWait(driver, 30)
+    try:
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    except Exception:
+        pass
+
+    # look for <img> with src containing image_name or alt containing its stem
+    stem = Path(image_name).stem.lower()
+    xpaths = [
+        f"//img[contains(@src, '{image_name}')]",
+        f"//img[contains(translate(@alt, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{stem}')]",
+        f"//a[img[contains(@src, '{image_name}')]]",
+        f"//button[img[contains(@src, '{image_name}')]]",
+        f"//*[contains(@style, '{image_name}')]",
+    ]
+    for xp in xpaths:
+        try:
+            elems = driver.find_elements(By.XPATH, xp)
+            for el in elems:
+                if not el.is_displayed():
+                    continue
+                # prefer ancestor anchor
+                try:
+                    parent_a = el.find_element(By.XPATH, './ancestor::a[1]')
+                except Exception:
+                    parent_a = None
+                target = parent_a if parent_a is not None else el
+                driver.execute_script("arguments[0].scrollIntoView(true);", target)
+                time.sleep(0.5)
+                try:
+                    target.click()
+                except ElementClickInterceptedException:
+                    driver.execute_script("arguments[0].click();", target)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def wait_for_download(download_dir: Path, timeout: int = 120) -> Path:
+    start = time.time()
+    seen = set(download_dir.iterdir()) if download_dir.exists() else set()
+    while time.time() - start < timeout:
+        time.sleep(1)
+        files = set(download_dir.iterdir()) if download_dir.exists() else set()
+        new = files - seen
+        candidates = [f for f in new if not f.name.endswith('.crdownload') and not f.name.endswith('.part')]
+        if candidates:
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            path = candidates[0]
+            # wait until file size stabilizes
+            prev = -1
+            stable = 0
+            while time.time() - start < timeout:
+                size = path.stat().st_size
+                if size == prev:
+                    stable += 1
+                    if stable >= 3:
+                        return path
+                else:
+                    prev = size
+                    stable = 0
+                time.sleep(0.5)
+        # also check existing files for completed downloads
+        for f in files:
+            if f.name.endswith('.crdownload'):
+                continue
+            # if file is older than 1s consider it done
+            if time.time() - f.stat().st_mtime > 1:
+                return f
+    raise TimeoutError(f"No downloaded file appeared in {download_dir} within {timeout}s")
+
+
+def copy_to_prediction(source_file: Path, prediction_file: Path, dest_sheet: str = 'RAW'):
+    # read source - try excel then csv
+    try:
+        df = pd.read_excel(source_file)
+    except Exception:
+        df = pd.read_csv(source_file)
+
+    # ensure prediction exists or create
+    prediction_file = Path(prediction_file)
+    if prediction_file.exists():
+        book = load_workbook(prediction_file)
+    else:
+        # create empty workbook
+        book = None
+
+    # use pandas ExcelWriter with openpyxl engine to preserve other sheets
+    with pd.ExcelWriter(prediction_file, engine='openpyxl', mode='a' if prediction_file.exists() else 'w') as writer:
+        try:
+            if book is not None:
+                writer.book = book
+                # remove existing sheet if present
+                if dest_sheet in writer.book.sheetnames:
+                    std = writer.book[dest_sheet]
+                    writer.book.remove(std)
+        except Exception:
+            pass
+        df.to_excel(writer, sheet_name=dest_sheet, index=False)
+        writer.save()
+
+
+def automate_nse_download(download_dir: str, image_name: str = 'abcd.png', prediction_file: str = 'prediction.xlsx', headless: bool = True):
+    download_dir = Path(download_dir)
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    driver = make_driver(str(download_dir), headless=headless)
+    try:
+        driver.get(NSE_URL)
+        time.sleep(5)
+
+        clicked = find_and_click_by_image(driver, image_name)
+        if not clicked:
+            raise RuntimeError('Could not find or click the image/button on the page')
+
+        downloaded = wait_for_download(download_dir, timeout=180)
+        # move/rename to ensure stable path
+        dest = download_dir / downloaded.name
+        # downloaded is already in download_dir; ensure Path object
+        downloaded = Path(downloaded)
+
+        # open and copy content into prediction RAW sheet
+        copy_to_prediction(downloaded, Path(prediction_file), dest_sheet='RAW')
+
+        # remove the original downloaded file
+        try:
+            downloaded.unlink()
+        except Exception:
+            pass
+
+        return True
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--download-dir', default='./downloads')
+    parser.add_argument('--image', default='abcd.png')
+    parser.add_argument('--prediction', default='prediction.xlsx')
+    parser.add_argument('--no-headless', action='store_true')
+    args = parser.parse_args()
+
+    ok = automate_nse_download(args.download_dir, image_name=args.image, prediction_file=args.prediction, headless=not args.no_headless)
+    if ok:
+        print('Done')
+        sys.exit(0)
+    else:
+        print('Failed')
+        sys.exit(1)

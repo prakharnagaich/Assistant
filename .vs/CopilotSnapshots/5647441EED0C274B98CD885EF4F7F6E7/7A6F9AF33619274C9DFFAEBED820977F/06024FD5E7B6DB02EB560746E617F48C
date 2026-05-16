@@ -1,0 +1,31 @@
+﻿import os
+from moviepy.editor import VideoFileClip
+import speech_recognition as sr
+from pydub import AudioSegment
+
+def video_to_transcript(video_path):
+    # Extract audio from video
+    audio_path = 'temp_audio.wav'
+    video = VideoFileClip(video_path)
+    video.audio.write_audiofile(audio_path)
+
+    # Load audio for transcription
+    recognizer = sr.Recognizer()
+    audio = AudioSegment.from_wav(audio_path)
+    audio.export(audio_path, format="wav")
+    with sr.AudioFile(audio_path) as source:
+        audio_data = recognizer.record(source)
+        try:
+            transcript = recognizer.recognize_google(audio_data)
+        except sr.UnknownValueError:
+            transcript = "Could not understand audio."
+        except sr.RequestError as e:
+            transcript = f"Could not request results; {e}"
+    os.remove(audio_path)
+    return transcript
+
+if __name__ == "__main__":
+    video_file = input("Enter the path to your MP4 video: ")
+    transcript = video_to_transcript(video_file)
+    print("Transcript:")
+    print(transcript)

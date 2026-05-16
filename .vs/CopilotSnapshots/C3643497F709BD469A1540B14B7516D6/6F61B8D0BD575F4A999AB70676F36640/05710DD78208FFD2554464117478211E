@@ -1,0 +1,101 @@
+﻿import streamlit as st
+
+# Try to import the official Google generative AI client and handle if it's not installed.
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+# Hard-coded API key preserved from original file.
+API_KEY = "AIzaSyAHKPqEZ66TiHlG660ncBR-eIP-ehJo8OY"
+MODEL_NAME = "gemini-2.5-flash"
+
+def generate_ai_explanation(api_key: str, prompt: str) -> str:
+    if genai is None:
+        raise RuntimeError("`google-generativeai` package is not installed. Install with `pip install google-generativeai`.")
+
+    # Configure the client
+    genai.configure(api_key=api_key)
+
+    # Create model object (some client versions require different call patterns)
+    try:
+        model = genai.GenerativeModel(MODEL_NAME)
+    except Exception:
+        model = None
+
+    # Try multiple ways to generate content to be resilient across client versions
+    response = None
+    errors = []
+    if model is not None:
+        try:
+            response = model.generate_content(prompt)
+        except Exception as e:
+            errors.append(f"model.generate_content failed: {e}")
+        if response is None:
+            try:
+                # alternative method name
+                response = model.generate(prompt)
+            except Exception as e:
+                errors.append(f"model.generate failed: {e}")
+
+    if response is None:
+        try:
+            # newer client exposures
+            response = genai.generate(model=MODEL_NAME, prompt=prompt)
+        except Exception as e:
+            errors.append(f"genai.generate failed: {e}")
+
+    if response is None:
+        raise RuntimeError("All attempts to call the Generative API failed: " + "; ".join(errors))
+
+    # Extract text from common response shapes
+    text = None
+    # prefer attribute .text
+    if hasattr(response, "text") and getattr(response, "text"):
+        text = getattr(response, "text")
+
+    # dict-like shape
+    if text is None and isinstance(response, dict):
+        if "candidates" in response and response["candidates"]:
+            text = response["candidates"][0].get("content")
+        text = text or response.get("output") or response.get("outputText")
+        if not text and "choices" in response and response["choices"]:
+            ch = response["choices"][0]
+            text = ch.get("text") or (ch.get("message") or {}).get("content")
+
+    # object with attributes
+    if text is None:
+        for attr in ("output", "content", "result"):
+            if hasattr(response, attr):
+                val = getattr(response, attr)
+                if isinstance(val, str) and val:
+                    text = val
+                    break
+                if isinstance(val, (list,)) and val:
+                    # try first candidate
+                    first = val[0]
+                    if isinstance(first, dict) and first.get("content"):
+                        text = first.get("content")
+                        break
+
+    if text is None:
+        # final fallback
+        text = str(response)
+
+    return text
+
+st.set_page_config(page_title="Gemini — Simple QA", layout="centered")
+st.title("Gemini — Ask a Question")
+
+prompt = st.text_area("Enter your question", height=200)
+
+if st.button("Ask"):
+    if not prompt.strip():
+        st.error("Please enter a question.")
+    else:
+        try:
+            answer = generate_ai_explanation(API_KEY, prompt)
+            st.subheader("Answer")
+            st.write(answer)
+        except Exception as ex:
+            st.error(f"Request failed: {ex}")

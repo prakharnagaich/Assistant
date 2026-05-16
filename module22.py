@@ -1,0 +1,12 @@
+from youtube_transcript_api import YouTubeTranscriptApi
+
+video_id = "B6dsFz2ro8M"  # Example: TED talk
+ytt_api = YouTubeTranscriptApi()
+out = []
+transcript_list = ytt_api.fetch(video_id, languages=['en'])
+for i in transcript_list:
+    outtex = i.text  # Use attribute access instead of subscript
+    out.append(outtex)
+# Join the list into a single string and remove commas and single quotes
+cleaned_output = " ".join(out).replace(",", "").replace("'", "")
+print(cleaned_output)

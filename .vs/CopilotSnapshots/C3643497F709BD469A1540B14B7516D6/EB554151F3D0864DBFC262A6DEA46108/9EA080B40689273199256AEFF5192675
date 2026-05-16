@@ -1,0 +1,95 @@
+﻿import streamlit as st
+import json
+
+# Use the official Google generative AI client if available.
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+st.set_page_config(page_title="Gemini (Generative) - Streamlit", layout="centered")
+st.title("Gemini / Generative API — Streamlit")
+
+st.markdown("Provide your API key and a prompt, then press Generate.\n\nIf you don't have the `google-generativeai` package installed, run `pip install google-generativeai`.")
+
+api_key = st.text_input("API key", type="password")
+model = st.text_input("Model name", value="gemini-2.5-flash")
+prompt = st.text_area("Prompt / Question", height=200)
+show_raw = st.checkbox("Show raw response JSON")
+
+if st.button("Generate"):
+    if not api_key:
+        st.error("API key is required")
+    elif not prompt:
+        st.error("Prompt is required")
+    else:
+        if genai is None:
+            st.error("`google.generativeai` is not installed. Run `pip install google-generativeai` and restart the app.")
+        else:
+            with st.spinner("Calling the Generative API..."):
+                try:
+                    # configure the client with the provided API key
+                    genai.configure(api_key="AIzaSyAHKPqEZ66TiHlG660ncBR-eIP-ehJo8OY")
+
+                    # Try a couple of client call styles to be tolerant of different library versions.
+                    response = None
+                    try:
+                        # newer versions expose a helper to call models
+                        response = genai.generate(model=model, prompt=prompt)
+                    except Exception:
+                        try:
+                            # older style used a GenerativeModel object
+                            model_obj = genai.GenerativeModel(model)
+                            response = model_obj.generate_content(prompt)
+                        except Exception as e:
+                            raise e
+
+                    # Try to extract text from common response shapes
+                    text = None
+                    if response is None:
+                        raise RuntimeError("No response from API")
+
+                    # If response is a dict-like object
+                    if isinstance(response, dict):
+                        # Typical fields: 'candidates' -> list -> {'content': ...}
+                        if "candidates" in response and response["candidates"]:
+                            text = response["candidates"][0].get("content")
+                        text = text or response.get("output") or response.get("outputText") or response.get("generated_text")
+                        if not text and "choices" in response and response["choices"]:
+                            ch = response["choices"][0]
+                            text = ch.get("text") or (ch.get("message") or {}).get("content")
+
+                    # If response is an object with attributes (client libraries sometimes return objects)
+                    if text is None:
+                        # common attribute names
+                        for attr in ("text", "output", "content", "message", "result"):
+                            if hasattr(response, attr):
+                                val = getattr(response, attr)
+                                # If message is an object with content
+                                if isinstance(val, (str,)):
+                                    text = val
+                                    break
+                                if hasattr(val, "get") and val.get("content"):
+                                    text = val.get("content")
+                                    break
+
+                    if text is None:
+                        # Fallback to string representation
+                        text = str(response)
+
+                    st.subheader("Answer")
+                    st.write(text)
+
+                    if show_raw:
+                        st.subheader("Raw response")
+                        if isinstance(response, dict):
+                            st.json(response)
+                        else:
+                            # try to convert to JSON if possible, otherwise show repr
+                            try:
+                                st.json(json.loads(json.dumps(response, default=str)))
+                            except Exception:
+                                st.write(repr(response))
+
+                except Exception as e:
+                    st.error(f"Request failed: {e}")

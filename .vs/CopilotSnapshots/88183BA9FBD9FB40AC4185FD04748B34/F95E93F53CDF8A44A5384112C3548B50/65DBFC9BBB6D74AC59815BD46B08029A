@@ -1,0 +1,23 @@
+﻿# ── Core TTS ─────────────────────────────────────────────────────────────────
+# ⚠️  DO NOT use `TTS` or `tts` — the original Coqui AI PyPI package is
+#     abandoned and cannot be found by pip.
+#     Use the community-maintained fork `coqui-tts` instead.
+#     It installs the same `TTS` Python namespace so all imports are identical.
+coqui-tts>=0.23.1            # ← correct package name
+
+# ── Audio processing ──────────────────────────────────────────────────────────
+librosa>=0.11.0              # coqui-tts 0.23+ requires >=0.11
+soundfile>=0.12.1            # Fast WAV I/O (needs libsndfile system lib)
+numpy>=1.26.0
+
+# ── Deep learning ─────────────────────────────────────────────────────────────
+# Install PyTorch separately per your CUDA version — see README.
+# torch>=2.0.0
+# torchaudio>=2.0.0
+
+# ── Web interface ─────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+tqdm>=4.65.0
+requests>=2.31.0

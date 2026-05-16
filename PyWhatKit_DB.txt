@@ -1,0 +1,10 @@
+Date: 7/9/2025
+Time: 12:45
+Phone Number: +918527710741
+Message: Hi
+--------------------
+Date: 10/9/2025
+Time: 15:53
+Phone Number: +918527710741
+Message: Hello from Python!
+--------------------

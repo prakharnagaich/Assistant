@@ -1,0 +1,178 @@
+﻿import streamlit as st
+
+# Try to import the official Google generative AI client and handle if it's not installed.
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+# Optional parsers
+try:
+    import docx
+except Exception:
+    docx = None
+
+try:
+    import PyPDF2
+except Exception:
+    PyPDF2 = None
+
+# Optional OCR for images
+try:
+    from PIL import Image
+    import pytesseract
+except Exception:
+    Image = None
+    pytesseract = None
+
+st.set_page_config(page_title="Gemini Q&A - 3 Files", page_icon="🤖")
+st.title("🤖 Gemini Q&A — Three files and questions")
+st.write("Upload 1 image (will attempt OCR if available) and 2 documents, provide a question for each, and get answers plus a combined summary.")
+
+# Sidebar for API Key and model
+st.sidebar.header("🔐 Configuration")
+api_key = st.sidebar.text_input("Enter your Gemini API Key", type="password", help="Get it from Google AI Studio")
+MODEL_NAME = st.sidebar.text_input("Model name", value="gemini-2.5-flash")
+
+st.header("File 1 — Image (PNG/JPG)")
+image_file = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"], key="img1")
+q1 = st.text_area("Question for image", height=80, key="q1")
+
+st.header("File 2 — Document (PDF/DOCX/TXT)")
+doc_file_2 = st.file_uploader("Upload document 2", type=["pdf", "docx", "txt"], key="doc2")
+q2 = st.text_area("Question for document 2", height=80, key="q2")
+
+st.header("File 3 — Document (PDF/DOCX/TXT)")
+doc_file_3 = st.file_uploader("Upload document 3", type=["pdf", "docx", "txt"], key="doc3")
+q3 = st.text_area("Question for document 3", height=80, key="q3")
+
+
+def _extract_text_from_doc(uploaded) -> str:
+    if uploaded is None:
+        return ""
+    name = uploaded.name.lower() if hasattr(uploaded, "name") else ""
+    try:
+        if name.endswith('.txt'):
+            raw = uploaded.read()
+            return raw.decode('utf-8', errors='replace')
+        if name.endswith('.docx'):
+            if docx is None:
+                return f"[docx file uploaded ({uploaded.name}) — python-docx not installed]"
+            uploaded.seek(0)
+            document = docx.Document(uploaded)
+            return '\n'.join(p.text for p in document.paragraphs)
+        if name.endswith('.pdf'):
+            if PyPDF2 is None:
+                return f"[pdf uploaded ({uploaded.name}) — PyPDF2 not installed]"
+            uploaded.seek(0)
+            reader = PyPDF2.PdfReader(uploaded)
+            texts = []
+            for page in reader.pages:
+                try:
+                    texts.append(page.extract_text() or "")
+                except Exception:
+                    continue
+            return '\n'.join(texts)
+    except Exception as e:
+        return f"[error extracting {uploaded.name}: {e}]"
+    # fallback
+    try:
+        uploaded.seek(0)
+        raw = uploaded.read()
+        return raw.decode('utf-8', errors='replace')
+    except Exception:
+        return str(uploaded)
+
+
+def _extract_text_from_image(uploaded) -> str:
+    if uploaded is None:
+        return ""
+    if Image is None or pytesseract is None:
+        return f"[image uploaded ({uploaded.name}) — OCR not available (install Pillow and pytesseract)]"
+    try:
+        uploaded.seek(0)
+        img = Image.open(uploaded)
+        text = pytesseract.image_to_string(img)
+        return text or f"[image uploaded ({uploaded.name}) — no text found via OCR]"
+    except Exception as e:
+        return f"[error extracting image text: {e}]"
+
+
+def _call_gemini(model_name: str, prompt: str, api_key: str):
+    if genai is None:
+        raise RuntimeError("`google-generativeai` package is not installed. Install with `pip install google-generativeai`.")
+    genai.configure(api_key=api_key)
+    # try model object then fallback
+    try:
+        model = genai.GenerativeModel(model_name)
+        try:
+            resp = model.generate_content(prompt)
+            return getattr(resp, 'text', str(resp))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        resp = genai.generate(model=model_name, prompt=prompt)
+        # resp may be dict-like
+        if isinstance(resp, dict):
+            # try common fields
+            if 'candidates' in resp and resp['candidates']:
+                return resp['candidates'][0].get('content') or str(resp)
+        return str(resp)
+    except Exception as e:
+        raise RuntimeError(f"Generative API call failed: {e}")
+
+
+# Action button
+if st.button("Generate Answers"):
+    if not api_key:
+        st.error("Please enter your Gemini API key in the sidebar.")
+    else:
+        # require all three files and questions
+        if not (image_file and doc_file_2 and doc_file_3):
+            st.error("Please upload all three files: one image and two documents.")
+        elif not (q1.strip() and q2.strip() and q3.strip()):
+            st.error("Please enter all three questions.")
+        else:
+            with st.spinner("Extracting texts and calling Gemini..."):
+                img_text = _extract_text_from_image(image_file)
+                doc2_text = _extract_text_from_doc(doc_file_2)
+                doc3_text = _extract_text_from_doc(doc_file_3)
+
+                # build prompts per pair
+                prompt1 = f"Context from image:\n{img_text}\n\nQuestion:\n{q1}"
+                prompt2 = f"Context from document:\n{doc2_text}\n\nQuestion:\n{q2}"
+                prompt3 = f"Context from document:\n{doc3_text}\n\nQuestion:\n{q3}"
+
+                try:
+                    ans1 = _call_gemini(MODEL_NAME, prompt1, api_key)
+                except Exception as e:
+                    ans1 = f"Error: {e}"
+                try:
+                    ans2 = _call_gemini(MODEL_NAME, prompt2, api_key)
+                except Exception as e:
+                    ans2 = f"Error: {e}"
+                try:
+                    ans3 = _call_gemini(MODEL_NAME, prompt3, api_key)
+                except Exception as e:
+                    ans3 = f"Error: {e}"
+
+                st.subheader("Answers")
+                st.markdown("**Answer 1 (image):**")
+                st.write(ans1)
+                st.markdown("**Answer 2 (doc 2):**")
+                st.write(ans2)
+                st.markdown("**Answer 3 (doc 3):**")
+                st.write(ans3)
+
+                # combined summary across all files and questions
+                combined_context = f"Image context:\n{img_text}\n\nDoc2 context:\n{doc2_text}\n\nDoc3 context:\n{doc3_text}"
+                combined_prompt = f"You are given the following contexts from three files:\n{combined_context}\n\nQuestions:\n1) {q1}\n2) {q2}\n3) {q3}\n\nProvide a concise combined response addressing each question and any relevant cross-file insights."
+                try:
+                    combined_ans = _call_gemini(MODEL_NAME, combined_prompt, api_key)
+                except Exception as e:
+                    combined_ans = f"Error: {e}"
+
+                st.subheader("Combined Summary")
+                st.write(combined_ans)

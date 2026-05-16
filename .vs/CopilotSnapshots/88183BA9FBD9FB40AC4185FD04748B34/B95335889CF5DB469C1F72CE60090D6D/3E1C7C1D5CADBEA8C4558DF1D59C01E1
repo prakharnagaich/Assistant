@@ -1,0 +1,1492 @@
+﻿# ============================================================
+#  NOVA — Gemini Voice Assistant (Streamlit)
+#  3-Screen App: API Setup | Voice Chat | Interaction Logs
+# ============================================================
+#
+#  INSTALL DEPENDENCIES:
+#  pip install streamlit google-generativeai SpeechRecognition gTTS
+#
+#  RUN:
+#  streamlit run nova_voice_assistant.py
+#
+#  FREE API KEY:
+#  https://aistudio.google.com/app/apikey
+# ============================================================
+
+import streamlit as st
+import google.generativeai as genai
+import speech_recognition as sr
+from gtts import gTTS
+import io
+from datetime import datetime
+from typing import Tuple, Optional
+
+# ─── Page Config ────────────────────────────────────────────
+st.set_page_config(
+    page_title="Nova — Voice Assistant",
+    page_icon="🎙️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ─── Session State Defaults ─────────────────────────────────
+DEFAULTS = {
+    "api_key_set": False,
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.5-flash",
+    "current_page": "api_setup",
+    "logs": [],
+    "chat_session": None,
+    "last_user_text": "",
+    "last_ai_text": "",
+    "last_audio_bytes": None,
+    "processing": False,
+    "last_processed_input": "",
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ─── Global CSS ─────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap');
+
+:root {
+    --bg:       #080c14;
+    --surface:  #0e1521;
+    --card:     #131d2e;
+    --border:   #1e2d45;
+    --accent:   #00e5ff;
+    --accent2:  #7b61ff;
+    --green:    #00ffab;
+    --red:      #ff4f6a;
+    --yellow:   #ffd166;
+    --text:     #e8f1ff;
+    --muted:    #5a7190;
+    --radius:   14px;
+}
+
+/* ── Reset & Base ── */
+html, body, [class*="css"] {
+    background-color: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: 'DM Mono', monospace !important;
+}
+
+h1, h2, h3 { font-family: 'Syne', sans-serif !important; }
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: var(--surface) !important;
+    border-right: 1px solid var(--border) !important;
+    padding-top: 1.5rem !important;
+}
+[data-testid="stSidebar"] * { color: var(--text) !important; }
+
+/* ── Nav Buttons ── */
+.nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 12px 18px;
+    margin: 4px 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: left;
+}
+.nav-btn:hover  { background: var(--card); border-color: var(--border); color: var(--text); }
+.nav-btn.active { background: var(--card); border-color: var(--accent); color: var(--accent); }
+
+/* ── Cards ── */
+.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px;
+    margin-bottom: 18px;
+}
+.card-accent { border-color: var(--accent); box-shadow: 0 0 24px rgba(0,229,255,0.07); }
+
+/* ── Status Badge ── */
+.badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 100px;
+    font-size: 0.72rem;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 0.05em;
+}
+.badge-green  { background: rgba(0,255,171,0.12); color: var(--green); border: 1px solid rgba(0,255,171,0.25); }
+.badge-red    { background: rgba(255,79,106,0.12); color: var(--red);   border: 1px solid rgba(255,79,106,0.25); }
+.badge-yellow { background: rgba(255,209,102,0.12); color: var(--yellow); border: 1px solid rgba(255,209,102,0.25); }
+.badge-blue   { background: rgba(0,229,255,0.10); color: var(--accent); border: 1px solid rgba(0,229,255,0.22); }
+
+/* ── Chat Bubbles ── */
+.bubble-user {
+    background: linear-gradient(135deg, #1a2a45, #162040);
+    border: 1px solid var(--border);
+    border-radius: 14px 14px 4px 14px;
+    padding: 14px 18px;
+    margin: 10px 0 10px 15%;
+    font-size: 0.88rem;
+    line-height: 1.6;
+}
+.bubble-ai {
+    background: linear-gradient(135deg, #0a1f1a, #0d1f2d);
+    border: 1px solid rgba(0,229,255,0.2);
+    border-radius: 14px 14px 14px 4px;
+    padding: 14px 18px;
+    margin: 10px 15% 10px 0;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    box-shadow: 0 0 18px rgba(0,229,255,0.05);
+}
+.bubble-label {
+    font-size: 0.7rem;
+    color: var(--muted);
+    margin-bottom: 6px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+/* ── Log Row ── */
+.log-row {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 22px;
+    margin-bottom: 12px;
+    border-left: 3px solid var(--accent2);
+    transition: border-color 0.2s;
+}
+.log-row:hover { border-left-color: var(--accent); }
+.log-meta  { font-size: 0.72rem; color: var(--muted); margin-bottom: 10px; }
+.log-user  { font-size: 0.83rem; color: var(--text); margin-bottom: 6px; }
+.log-ai    { font-size: 0.83rem; color: var(--accent); }
+
+/* ── Input overrides ── */
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
+    background: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 10px !important;
+    color: var(--text) !important;
+    font-family: 'DM Mono', monospace !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 2px rgba(0,229,255,0.12) !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+    background: linear-gradient(135deg, var(--accent2), #5a45d4) !important;
+    border: none !important;
+    border-radius: 10px !important;
+    color: #fff !important;
+    font-family: 'Syne', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 0.88rem !important;
+    padding: 10px 22px !important;
+    transition: all 0.2s ease !important;
+}
+.stButton > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(123,97,255,0.35) !important;
+}
+.stButton > button:active { transform: translateY(0px) !important; }
+
+/* ── Audio Input ── */
+[data-testid="stAudioInput"] {
+    background: var(--card) !important;
+    border: 1px dashed var(--border) !important;
+    border-radius: var(--radius) !important;
+}
+
+/* ── Alerts ── */
+[data-testid="stAlert"] {
+    border-radius: var(--radius) !important;
+    border: 1px solid var(--border) !important;
+    background: var(--card) !important;
+}
+
+/* ── Divider ── */
+hr { border-color: var(--border) !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* ── Waveform Animation ── */
+.wave-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    height: 48px;
+    margin: 16px 0;
+}
+.wave-bar {
+    width: 4px;
+    background: var(--accent);
+    border-radius: 4px;
+    animation: wave 1.2s ease-in-out infinite;
+    opacity: 0.8;
+}
+.wave-bar:nth-child(1)  { animation-delay: 0.0s; height: 18px; }
+.wave-bar:nth-child(2)  { animation-delay: 0.1s; height: 30px; }
+.wave-bar:nth-child(3)  { animation-delay: 0.2s; height: 42px; }
+.wave-bar:nth-child(4)  { animation-delay: 0.3s; height: 24px; }
+.wave-bar:nth-child(5)  { animation-delay: 0.4s; height: 38px; }
+.wave-bar:nth-child(6)  { animation-delay: 0.5s; height: 20px; }
+.wave-bar:nth-child(7)  { animation-delay: 0.4s; height: 36px; }
+.wave-bar:nth-child(8)  { animation-delay: 0.3s; height: 26px; }
+.wave-bar:nth-child(9)  { animation-delay: 0.2s; height: 44px; }
+.wave-bar:nth-child(10) { animation-delay: 0.1s; height: 18px; }
+@keyframes wave {
+    0%, 100% { transform: scaleY(0.5); opacity: 0.5; }
+    50%       { transform: scaleY(1.0); opacity: 1.0; }
+}
+
+/* ── Stat Box ── */
+.stat-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 22px;
+    text-align: center;
+}
+.stat-num  { font-family: 'Syne', sans-serif; font-size: 2rem; font-weight: 800; color: var(--accent); }
+.stat-label { font-size: 0.72rem; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.1em; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  HELPER FUNCTIONS
+# ══════════════════════════════════════════════════════════════
+
+def initialize_gemini(api_key: str, model_name: str = "gemini-2.5-flash"):
+    """Configure Gemini and return a chat session."""
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=(
+                "You are Nova, a friendly and concise voice assistant. "
+                "Always reply in short, natural sentences suitable for speech. "
+                "Never use bullet points, markdown, asterisks, or special characters. "
+                "Be warm, helpful, and get to the point quickly."
+            ),
+        )
+        return model.start_chat(history=[])
+    except Exception as e:
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg or "invalid" in error_msg.lower():
+            raise Exception("Invalid API key format or value")
+        elif "quota" in error_msg.lower() or "exceeded" in error_msg.lower():
+            raise Exception("API quota exceeded")
+        elif "not found" in error_msg.lower() or "model" in error_msg.lower():
+            raise Exception(f"Model '{model_name}' not available or not accessible with this API key")
+        else:
+            raise Exception(f"Failed to initialize Gemini: {error_msg}")
+
+
+def transcribe_audio(audio_bytes: bytes) -> Tuple[str, bool]:
+    """Convert audio bytes → text using Google Web Speech API (free)."""
+    recognizer = sr.Recognizer()
+    try:
+        audio_file = io.BytesIO(audio_bytes)
+        with sr.AudioFile(audio_file) as source:
+            recognizer.adjust_for_ambient_noise(source, duration=0.3)
+            audio_data = recognizer.record(source)
+        text = recognizer.recognize_google(audio_data)
+        return text, True
+    except sr.UnknownValueError:
+        return "Could not understand the audio. Please try again.", False
+    except sr.RequestError as e:
+        return f"Speech recognition service error: {e}", False
+    except Exception as e:
+        return f"Transcription error: {e}", False
+
+
+def ask_gemini(user_text: str) -> Tuple[str, bool]:
+    """Send text to Gemini and return the response."""
+    try:
+        if not st.session_state.chat_session:
+            return "Error: Chat session not initialized. Please reconnect your API key.", False
+        response = st.session_state.chat_session.send_message(user_text)
+        return response.text.strip(), True
+    except Exception as e:
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            return "Error: Invalid or expired API key. Please reconnect.", False
+        elif "429" in error_msg or "quota" in error_msg.lower():
+            return "Error: Rate limit exceeded. Please wait before trying again.", False
+        elif "not found" in error_msg.lower():
+            return "Error: Gemini model not available. Check API configuration.", False
+        else:
+            return f"Gemini error: {error_msg}", False
+
+
+def synthesize_speech(text: str) -> Optional[bytes]:
+    """Convert text → audio bytes using gTTS (free, online)."""
+    try:
+        buf = io.BytesIO()
+        gTTS(text=text, lang="en", slow=False).write_to_fp(buf)
+        buf.seek(0)
+        return buf.read()
+    except Exception:
+        return None
+
+
+def add_log(user_text: str, ai_text: str):
+    """Append a new entry to the interaction log."""
+    st.session_state.logs.append({
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "user": user_text,
+        "assistant": ai_text,
+    })
+
+
+# ══════════════════════════════════════════════════════════════
+#  SIDEBAR NAVIGATION
+# ══════════════════════════════════════════════════════════════
+
+def render_sidebar():
+    with st.sidebar:
+        # Logo / Brand
+        st.markdown("""
+        <div style="padding: 0 8px 20px;">
+            <div style="font-family:'Syne',sans-serif; font-size:1.6rem; font-weight:800;
+                        color:#e8f1ff; letter-spacing:-0.02em;">
+                🎙️ Nova
+            </div>
+            <div style="font-size:0.72rem; color:#5a7190; margin-top:2px; letter-spacing:0.08em;">
+                VOICE ASSISTANT
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # Connection status
+        if st.session_state.api_key_set:
+            st.markdown('<span class="badge badge-green">● CONNECTED</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="badge badge-red">● NOT CONNECTED</span>', unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Navigation pages
+        pages = [
+            ("api_setup",   "⚙️",  "API Setup"),
+            ("voice_chat",  "🎤",  "Voice Chat"),
+            ("quick_voice", "⚡",  "Quick Voice"),
+            ("logs",        "📋",  "Interaction Logs"),
+        ]
+        for page_id, icon, label in pages:
+            is_active   = st.session_state.current_page == page_id
+            is_disabled = (page_id in ("voice_chat", "quick_voice")) and not st.session_state.api_key_set
+
+            active_class = "active" if is_active else ""
+            muted_style  = "opacity:0.35; cursor:not-allowed;" if is_disabled else ""
+
+            # Render as a clickable Streamlit button styled via class
+            if st.button(
+                f"{icon}  {label}",
+                key=f"nav_{page_id}",
+                disabled=is_disabled,
+                use_container_width=True,
+            ):
+                st.session_state.current_page = page_id
+                st.rerun()
+
+        st.markdown("---")
+
+        # Quick stats
+        total_logs = len(st.session_state.logs)
+        st.markdown(f"""
+        <div style="padding: 0 4px;">
+            <div style="font-size:0.7rem; color:#5a7190; text-transform:uppercase;
+                        letter-spacing:0.1em; margin-bottom:10px;">Session Stats</div>
+            <div style="display:flex; justify-content:space-between; align-items:center;
+                        background:#0e1521; border:1px solid #1e2d45; border-radius:10px;
+                        padding:12px 16px;">
+                <div>
+                    <div style="font-family:'Syne',sans-serif; font-size:1.4rem;
+                                font-weight:800; color:#00e5ff;">{total_logs}</div>
+                    <div style="font-size:0.68rem; color:#5a7190;">Interactions</div>
+                </div>
+                <div style="font-size:1.6rem;">💬</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("""
+        <div style="font-size:0.65rem; color:#3a5170; text-align:center; line-height:1.6;">
+            Powered by Gemini 2.5 Flash<br>
+            Free tier · No usage cost
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  SCREEN 1 — API SETUP
+# ══════════════════════════════════════════════════════════════
+
+def render_api_setup():
+    st.markdown("""
+    <h1 style="font-family:'Syne',sans-serif; font-size:2rem; font-weight:800;
+               margin-bottom:4px; letter-spacing:-0.02em;">⚙️ API Setup</h1>
+    <p style="color:#5a7190; font-size:0.85rem; margin-bottom:28px;">
+        Connect your free Gemini API key to activate Nova
+    </p>
+    """, unsafe_allow_html=True)
+
+    col_main, col_info = st.columns([3, 2], gap="large")
+
+    with col_main:
+        # Current status
+        if st.session_state.api_key_set:
+            st.markdown("""
+            <div class="card card-accent">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="font-size:2rem;">✅</div>
+                    <div>
+                        <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:1rem;">
+                            API Key Connected
+                        </div>
+                        <div style="color:#5a7190; font-size:0.78rem; margin-top:3px;">
+                            Nova is ready — switch to Voice Chat to start talking
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="card">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <div style="font-size:2rem;">🔑</div>
+                    <div>
+                        <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:1rem;">
+                            API Key Required
+                        </div>
+                        <div style="color:#5a7190; font-size:0.78rem; margin-top:3px;">
+                            Enter your Gemini key below to get started
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # API Key input
+        api_key_input = st.text_input(
+            "Gemini API Key",
+            type="password",
+            placeholder="AIza••••••••••••••••••••••••••••••••••••••",
+            value=st.session_state.gemini_api_key,
+            help="Your key is stored only in this session and never sent anywhere except Google's API.",
+        )
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🔗 Connect & Validate", use_container_width=True):
+                if not api_key_input.strip():
+                    st.error("Please enter an API key.")
+                else:
+                    with st.spinner("Validating key with Gemini…"):
+                        try:
+                            # Quick validation: initialize session
+                            chat = initialize_gemini(api_key_input.strip())
+                            st.session_state.gemini_api_key = api_key_input.strip()
+                            st.session_state.chat_session   = chat
+                            st.session_state.api_key_set    = True
+                            st.success("✅ Connected! Head to Voice Chat.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Validation failed: {e}")
+
+        with col_b:
+            if st.session_state.api_key_set:
+                if st.button("🔌 Disconnect", use_container_width=True):
+                    st.session_state.api_key_set    = False
+                    st.session_state.gemini_api_key = ""
+                    st.session_state.chat_session   = None
+                    st.session_state.current_page   = "api_setup"
+                    st.rerun()
+
+        # Reset chat session
+        if st.session_state.api_key_set:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔄 Reset Conversation Memory", use_container_width=True):
+                st.session_state.chat_session = initialize_gemini(
+                    st.session_state.gemini_api_key
+                )
+                st.success("Conversation memory cleared.")
+
+    with col_info:
+        st.markdown("""
+        <div class="card">
+            <div style="font-family:'Syne',sans-serif; font-weight:700;
+                        font-size:0.95rem; margin-bottom:14px; color:#00e5ff;">
+                📖 How to Get Your Free Key
+            </div>
+            <div style="font-size:0.8rem; line-height:1.8; color:#8aa8c8;">
+                <b style="color:#e8f1ff;">Step 1</b><br>
+                Go to <span style="color:#00e5ff;">aistudio.google.com/app/apikey</span><br><br>
+                <b style="color:#e8f1ff;">Step 2</b><br>
+                Sign in with your Google account<br><br>
+                <b style="color:#e8f1ff;">Step 3</b><br>
+                Click <em>Create API Key</em><br><br>
+                <b style="color:#e8f1ff;">Step 4</b><br>
+                Copy and paste it above
+            </div>
+        </div>
+
+        <div class="card" style="margin-top:0;">
+            <div style="font-family:'Syne',sans-serif; font-weight:700;
+                        font-size:0.95rem; margin-bottom:14px; color:#7b61ff;">
+                🆓 Free Tier Limits
+            </div>
+            <div style="font-size:0.78rem; line-height:2; color:#8aa8c8;">
+                <div style="display:flex; justify-content:space-between;">
+                    <span>Requests / min</span>
+                    <span style="color:#00e5ff;">15 RPM</span>
+                </div>
+                <div style="display:flex; justify-content:space-between;">
+                    <span>Requests / day</span>
+                    <span style="color:#00e5ff;">1,500 RPD</span>
+                </div>
+                <div style="display:flex; justify-content:space-between;">
+                    <span>Tokens / min</span>
+                    <span style="color:#00e5ff;">1M TPM</span>
+                </div>
+                <div style="display:flex; justify-content:space-between;">
+                    <span>Cost</span>
+                    <span style="color:#00ffab; font-weight:600;">$0.00</span>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  SCREEN 2 — VOICE CHAT
+# ══════════════════════════════════════════════════════════════
+
+def render_voice_chat():
+    st.markdown("""
+    <h1 style="font-family:'Syne',sans-serif; font-size:2rem; font-weight:800;
+               margin-bottom:4px; letter-spacing:-0.02em;">🎤 Voice Chat</h1>
+    <p style="color:#5a7190; font-size:0.85rem; margin-bottom:24px;">
+        Record your voice · Nova listens · Hear the reply
+    </p>
+    """, unsafe_allow_html=True)
+
+    col_chat, col_ctrl = st.columns([3, 2], gap="large")
+
+    with col_ctrl:
+        # ── Step 1: Record ──
+        st.markdown("""
+        <div class="card card-accent">
+            <div style="font-family:'Syne',sans-serif; font-weight:700;
+                        font-size:0.9rem; margin-bottom:12px; color:#00e5ff;">
+                🎙️ Step 1 — Record Your Voice
+            </div>
+        """, unsafe_allow_html=True)
+
+        audio_input = st.audio_input(
+            label="Click the mic to record, click again to stop",
+            key="voice_recorder",
+        )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── Text fallback ──
+        st.markdown("""
+        <div class="card" style="margin-top:0;">
+            <div style="font-family:'Syne',sans-serif; font-weight:700;
+                        font-size:0.9rem; margin-bottom:12px; color:#7b61ff;">
+                ⌨️ Or Type Instead
+            </div>
+        """, unsafe_allow_html=True)
+
+        text_fallback = st.text_area(
+            label="Type your message",
+            placeholder="e.g. What is the capital of France?",
+            height=90,
+            label_visibility="collapsed",
+            key="text_input_area",
+        )
+        send_text = st.button("📨 Send Text", use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── Process audio ──
+        process_triggered = False
+        user_text = ""
+
+        if audio_input is not None:
+            audio_bytes = audio_input.getvalue()
+            if audio_bytes and len(audio_bytes) > 1000:
+                st.markdown("""
+                <div class="wave-container">
+                    <div class="wave-bar"></div><div class="wave-bar"></div>
+                    <div class="wave-bar"></div><div class="wave-bar"></div>
+                    <div class="wave-bar"></div><div class="wave-bar"></div>
+                    <div class="wave-bar"></div><div class="wave-bar"></div>
+                    <div class="wave-bar"></div><div class="wave-bar"></div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                with st.spinner("🔊 Transcribing…"):
+                    user_text, ok = transcribe_audio(audio_bytes)
+
+                if ok:
+                    st.markdown(f"""
+                    <div style="background:#0a1f1a; border:1px solid rgba(0,255,171,0.2);
+                                border-radius:10px; padding:12px 16px; font-size:0.82rem;
+                                color:#00ffab; margin-top:8px;">
+                        🗣️ <em>"{user_text}"</em>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    process_triggered = True
+                else:
+                    st.warning(user_text)
+
+        if send_text and text_fallback.strip():
+            user_text        = text_fallback.strip()
+            process_triggered = True
+            # Clear the text input after triggering
+            st.session_state.text_input_area = ""
+
+        # ── Call Gemini + TTS ──
+        # Only process if triggered AND text is different from last processed input
+        if process_triggered and user_text and user_text != st.session_state.last_processed_input:
+            st.session_state.processing = True
+            st.session_state.last_processed_input = user_text
+
+            with st.spinner("🤖 Nova is thinking…"):
+                ai_text, ok = ask_gemini(user_text)
+
+            if ok:
+                st.session_state.last_user_text = user_text
+                st.session_state.last_ai_text   = ai_text
+
+                with st.spinner("🔊 Generating voice reply…"):
+                    audio_out = synthesize_speech(ai_text)
+                    st.session_state.last_audio_bytes = audio_out
+
+                add_log(user_text, ai_text)
+                st.session_state.processing = False
+                st.rerun()
+            else:
+                st.error(ai_text)
+                st.session_state.processing = False
+
+        # ── Play latest reply ──
+        if st.session_state.last_audio_bytes:
+            st.markdown("""
+            <div class="card" style="margin-top:0;">
+                <div style="font-family:'Syne',sans-serif; font-weight:700;
+                            font-size:0.9rem; margin-bottom:10px; color:#ffd166;">
+                    🔊 Nova's Reply
+                </div>
+            """, unsafe_allow_html=True)
+            st.audio(st.session_state.last_audio_bytes, format="audio/mp3", autoplay=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_chat:
+        # ── Conversation display ──
+        st.markdown("""
+        <div style="font-family:'Syne',sans-serif; font-weight:700;
+                    font-size:0.9rem; color:#5a7190; text-transform:uppercase;
+                    letter-spacing:0.1em; margin-bottom:14px;">
+            Conversation
+        </div>
+        """, unsafe_allow_html=True)
+
+        if not st.session_state.logs:
+            st.markdown("""
+            <div style="text-align:center; padding:60px 20px; color:#2a3f5f;">
+                <div style="font-size:3rem; margin-bottom:12px;">🎙️</div>
+                <div style="font-family:'Syne',sans-serif; font-size:1rem; font-weight:600;">
+                    No conversation yet
+                </div>
+                <div style="font-size:0.78rem; margin-top:6px;">
+                    Record your voice or type a message to start chatting with Nova
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            for entry in st.session_state.logs:
+                st.markdown(f"""
+                <div style="font-size:0.68rem; color:#3a5170;
+                            text-align:right; margin-bottom:4px;">
+                    {entry['timestamp']}
+                </div>
+                <div class="bubble-user">
+                    <div class="bubble-label">YOU</div>
+                    {entry['user']}
+                </div>
+                <div class="bubble-ai">
+                    <div class="bubble-label" style="color:#00e5ff;">NOVA</div>
+                    {entry['assistant']}
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Clear conversation
+        if st.session_state.logs:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🗑️ Clear Conversation", use_container_width=True):
+                st.session_state.logs = []
+                st.session_state.last_user_text   = ""
+                st.session_state.last_ai_text     = ""
+                st.session_state.last_audio_bytes = None
+                # Reset Gemini memory too
+                st.session_state.chat_session = initialize_gemini(
+                    st.session_state.gemini_api_key
+                )
+                st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════
+#  SCREEN 3 — INTERACTION LOGS
+# ══════════════════════════════════════════════════════════════
+
+def render_logs():
+    st.markdown("""
+    <h1 style="font-family:'Syne',sans-serif; font-size:2rem; font-weight:800;
+               margin-bottom:4px; letter-spacing:-0.02em;">📋 Interaction Logs</h1>
+    <p style="color:#5a7190; font-size:0.85rem; margin-bottom:24px;">
+        Full history of every exchange in this session
+    </p>
+    """, unsafe_allow_html=True)
+
+    logs = st.session_state.logs
+
+    # ── Stats row ──
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-num">{len(logs)}</div>
+            <div class="stat-label">Total Interactions</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        avg_len = (
+            round(sum(len(e["assistant"].split()) for e in logs) / len(logs))
+            if logs else 0
+        )
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-num">{avg_len}</div>
+            <div class="stat-label">Avg. Reply Words</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        session_start = logs[0]["timestamp"] if logs else "—"
+        st.markdown(f"""
+        <div class="stat-box">
+            <div class="stat-num" style="font-size:1.1rem; padding-top:8px;">
+                {session_start[:10] if logs else "—"}
+            </div>
+            <div class="stat-label">Session Date</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if not logs:
+        st.markdown("""
+        <div style="text-align:center; padding:60px 20px; color:#2a3f5f;">
+            <div style="font-size:3rem; margin-bottom:12px;">📭</div>
+            <div style="font-family:'Syne',sans-serif; font-size:1rem; font-weight:600;">
+                No logs yet
+            </div>
+            <div style="font-size:0.78rem; margin-top:6px;">
+                Start a conversation in Voice Chat — every exchange will appear here
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # ── Search / filter ──
+        search = st.text_input(
+            "🔍 Search logs",
+            placeholder="Filter by keyword…",
+            label_visibility="collapsed",
+        )
+
+        filtered = [
+            e for e in logs
+            if not search or (
+                search.lower() in e["user"].lower()
+                or search.lower() in e["assistant"].lower()
+            )
+        ]
+
+        st.markdown(f"""
+        <div style="font-size:0.75rem; color:#5a7190; margin-bottom:14px;">
+            Showing {len(filtered)} of {len(logs)} entries
+            {"· filtered by "" + search + """ if search else ""}
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Log entries (newest first) ──
+        for i, entry in enumerate(reversed(filtered)):
+            idx = len(filtered) - i
+            st.markdown(f"""
+            <div class="log-row">
+                <div class="log-meta">
+                    <span class="badge badge-blue">#{idx}</span>
+                    &nbsp; {entry['timestamp']}
+                </div>
+                <div class="log-user">
+                    <span style="color:#5a7190; font-size:0.7rem;
+                                 text-transform:uppercase; letter-spacing:0.08em;">
+                        YOU &nbsp;→
+                    </span>
+                    &nbsp; {entry['user']}
+                </div>
+                <div class="log-ai">
+                    <span style="color:#5a7190; font-size:0.7rem;
+                                 text-transform:uppercase; letter-spacing:0.08em;">
+                        NOVA →
+                    </span>
+                    &nbsp; {entry['assistant']}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ── Export & Clear ──
+        st.markdown("<br>", unsafe_allow_html=True)
+        col_exp, col_clr = st.columns(2)
+
+        with col_exp:
+            import json
+            log_json = json.dumps(logs, indent=2, ensure_ascii=False)
+            st.download_button(
+                label="⬇️ Export Logs as JSON",
+                data=log_json,
+                file_name=f"nova_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+        with col_clr:
+            if st.button("🗑️ Clear All Logs", use_container_width=True):
+                st.session_state.logs = []
+                st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════
+#  SCREEN 4 — QUICK VOICE  (always-on, streaming, parallel TTS)
+# ══════════════════════════════════════════════════════════════
+
+def render_quick_voice():
+    if not st.session_state.api_key_set:
+        st.warning("⚠️ Please set up your API key first.")
+        return
+
+    st.markdown("""
+    <h1 style="font-family:'Syne',sans-serif; font-size:2rem; font-weight:800;
+               margin-bottom:4px; letter-spacing:-0.02em;">⚡ Quick Voice</h1>
+    <p style="color:#5a7190; font-size:0.85rem; margin-bottom:20px;">
+        Always-on receiver · Auto-sends after 2 s silence · Streams AI + plays audio in parallel
+    </p>
+    """, unsafe_allow_html=True)
+
+    safe_key = (
+        st.session_state.gemini_api_key
+        .replace("\\", "\\\\")
+        .replace('"',  '\\"')
+        .replace("'",  "\\'")
+    )
+
+    html = _QUICK_VOICE_HTML.replace("__GEMINI_KEY__", safe_key)
+    st.components.v1.html(html, height=820, scrolling=False)
+
+
+# ──────────────────────────────────────────────────────────────
+#  Self-contained HTML/CSS/JS component for Quick Voice
+# ──────────────────────────────────────────────────────────────
+_QUICK_VOICE_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#080c14;--surface:#0e1521;--card:#131d2e;--border:#1e2d45;
+  --accent:#00e5ff;--accent2:#7b61ff;--green:#00ffab;--red:#ff4f6a;
+  --yellow:#ffd166;--text:#e8f1ff;--muted:#5a7190;--r:12px;
+}
+body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;padding:8px 4px;overflow-x:hidden}
+
+/* ── Status bar ── */
+#status-bar{
+  display:flex;align-items:center;gap:10px;padding:12px 18px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);margin-bottom:12px;
+}
+#s-dot{width:10px;height:10px;border-radius:50%;background:var(--muted);flex-shrink:0;transition:background .3s}
+#s-dot.idle     {background:var(--muted)}
+#s-dot.listening{background:var(--green);animation:blink 1.4s infinite}
+#s-dot.thinking {background:var(--yellow);animation:blink .7s infinite}
+#s-dot.speaking {background:var(--accent);animation:blink .9s infinite}
+#s-dot.error    {background:var(--red)}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.45}}
+#s-text{flex:1;font-size:.82rem}
+#s-detail{font-size:.7rem;color:var(--muted);max-width:180px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── Waveform ── */
+#viz{display:flex;align-items:center;justify-content:center;gap:3px;height:50px;margin:10px 0}
+.bar{width:3px;border-radius:3px;background:var(--border);height:4px;transition:background .3s}
+.bar.l{background:var(--green);animation:wl var(--d,.4s) ease-in-out infinite alternate}
+.bar.t{background:var(--yellow);animation:wt 1.2s ease-in-out infinite alternate}
+.bar.s{background:var(--accent2);animation:ws var(--d,.35s) ease-in-out infinite alternate}
+@keyframes wl{from{height:5px;opacity:.5}to{height:var(--h,28px);opacity:1}}
+@keyframes wt{from{height:3px;opacity:.3}to{height:16px;opacity:.75}}
+@keyframes ws{from{height:7px;opacity:.6}to{height:var(--h,38px);opacity:1}}
+
+/* ── Silence countdown ── */
+#sil-wrap{height:3px;background:var(--border);border-radius:3px;margin:6px 0;overflow:hidden;display:none}
+#sil-bar{height:100%;background:linear-gradient(90deg,var(--green),var(--yellow));width:0%;transition:width 2s linear;border-radius:3px}
+
+/* ── Live transcript ── */
+#tx-card{
+  background:var(--surface);border:1px dashed var(--border);border-radius:10px;
+  padding:10px 14px;min-height:44px;font-size:.8rem;color:var(--muted);
+  margin-bottom:12px;transition:border-color .3s,color .3s,background .3s;
+  line-height:1.6;
+}
+#tx-card.active{border-color:var(--green);color:var(--green);background:rgba(0,255,171,.05)}
+.tx-final{color:var(--green)}
+.tx-interim{color:var(--muted);font-style:italic}
+
+/* ── Conversation ── */
+#conv{display:flex;flex-direction:column;gap:10px;max-height:340px;overflow-y:auto;padding-right:4px;margin-bottom:12px}
+#conv::-webkit-scrollbar{width:4px}
+#conv::-webkit-scrollbar-track{background:var(--bg)}
+#conv::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.mu{
+  background:linear-gradient(135deg,#1a2a45,#162040);border:1px solid var(--border);
+  border-radius:12px 12px 4px 12px;padding:10px 14px;margin-left:12%;font-size:.79rem;line-height:1.6;
+}
+.ma{
+  background:linear-gradient(135deg,#0a1f1a,#0d1f2d);border:1px solid rgba(0,229,255,.2);
+  border-radius:12px 12px 12px 4px;padding:10px 14px;margin-right:12%;font-size:.79rem;
+  line-height:1.6;color:var(--accent);
+}
+.ml{font-size:.63rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.08em}
+
+/* ── TTS queue badge ── */
+#queue-badge{
+  display:inline-block;padding:2px 10px;border-radius:100px;font-size:.68rem;
+  background:rgba(123,97,255,.12);color:var(--accent2);border:1px solid rgba(123,97,255,.25);
+  margin-left:8px;display:none;
+}
+
+/* ── Controls ── */
+#ctrl{display:flex;gap:8px;align-items:center;margin-top:4px}
+.btn{
+  padding:10px 18px;border:none;border-radius:10px;font-family:'DM Mono',monospace;
+  font-size:.82rem;cursor:pointer;font-weight:600;transition:all .2s;
+}
+#btn-toggle{background:linear-gradient(135deg,#7b61ff,#5a45d4);color:#fff;flex:1}
+#btn-toggle:hover{transform:translateY(-1px);box-shadow:0 4px 16px rgba(123,97,255,.4)}
+#btn-toggle.on{background:linear-gradient(135deg,#ff4f6a,#c43050)}
+#btn-clear{background:var(--card);color:var(--muted);border:1px solid var(--border)}
+#btn-clear:hover{color:var(--text);border-color:var(--muted)}
+#btn-stop-tts{background:var(--card);color:var(--yellow);border:1px solid rgba(255,209,102,.25);display:none}
+#btn-stop-tts:hover{background:rgba(255,209,102,.08)}
+
+/* ── Browser warning ── */
+#warn{
+  background:rgba(255,79,106,.1);border:1px solid rgba(255,79,106,.3);
+  border-radius:10px;padding:14px 18px;font-size:.8rem;color:var(--red);
+  display:none;margin-bottom:12px;
+}
+
+/* ── Error toast ── */
+#err-toast{
+  position:fixed;bottom:12px;left:50%;transform:translateX(-50%);
+  background:#1a0f1a;border:1px solid var(--red);border-radius:10px;
+  padding:10px 18px;font-size:.78rem;color:var(--red);display:none;
+  z-index:999;white-space:nowrap;
+}
+</style>
+</head>
+<body>
+
+<div id="warn">⚠️ Quick Voice needs <b>Google Chrome</b> or <b>Microsoft Edge</b> — Web Speech API is required.</div>
+
+<div id="status-bar">
+  <div id="s-dot" class="idle"></div>
+  <div id="s-text">Quick Voice ready — press Start to begin</div>
+  <div id="s-detail"></div>
+</div>
+
+<div id="viz"></div>
+<div id="sil-wrap"><div id="sil-bar"></div></div>
+<div id="tx-card">Live transcript will appear here while you speak…</div>
+<div id="conv"></div>
+
+<div id="ctrl">
+  <button class="btn" id="btn-toggle" onclick="toggleMain()">🎙️ Start Listening</button>
+  <button class="btn" id="btn-stop-tts" onclick="stopTTS()">⏹ Stop Speaking</button>
+  <button class="btn" id="btn-clear" onclick="clearConv()">🗑️ Clear</button>
+</div>
+<span id="queue-badge"></span>
+
+<div id="err-toast"></div>
+
+<script>
+/* ── Constants ────────────────────────────────────────────── */
+const API_KEY   = "__GEMINI_KEY__";
+const MODEL     = "gemini-2.0-flash";
+const STREAM_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:streamGenerateContent?alt=sse&key=${API_KEY}`;
+const SYS_PROMPT = "You are Nova, a friendly and concise voice assistant. Always reply in short natural sentences suitable for speech. Never use bullet points markdown asterisks or special characters. Be warm helpful and get to the point quickly.";
+
+/* ── State ────────────────────────────────────────────────── */
+let isActive      = false;   // User wants listening ON
+let isListening   = false;   // recognition is running
+let isSpeaking    = false;   // TTS is playing / AI not yet done
+let recognition   = null;
+let silTimer      = null;
+let finalTx       = "";
+let interimTx     = "";
+let history       = [];      // Gemini conversation history [{role,parts}]
+let ttsQueue      = [];
+let ttsPlaying    = false;
+let selectedVoice = null;
+
+/* ── Browser support check ────────────────────────────────── */
+if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
+  document.getElementById("warn").style.display = "block";
+}
+
+/* ── Voices ───────────────────────────────────────────────── */
+function loadVoices() {
+  const vs = speechSynthesis.getVoices();
+  selectedVoice =
+    vs.find(v => v.name.includes("Google") && v.lang.startsWith("en")) ||
+    vs.find(v => v.lang.startsWith("en-US")) ||
+    vs.find(v => v.lang.startsWith("en")) ||
+    vs[0] || null;
+}
+speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+
+/* ── Build waveform bars ──────────────────────────────────── */
+const VIZ   = document.getElementById("viz");
+const PEAKS = [10,18,30,42,36,48,26,14,32,46,38,22,44,16,28,12];
+PEAKS.forEach((h, i) => {
+  const b = document.createElement("div");
+  b.className = "bar";
+  b.style.setProperty("--h", h + "px");
+  b.style.setProperty("--d", (.06 * i + .1) + "s");
+  VIZ.appendChild(b);
+});
+function vizState(s) {
+  VIZ.querySelectorAll(".bar").forEach(b => {
+    b.className = s === "idle" ? "bar" : "bar " + s;
+    if (s === "idle") b.style.height = "4px"; else b.style.height = "";
+  });
+}
+
+/* ── UI helpers ───────────────────────────────────────────── */
+function setStatus(cls, text, detail = "") {
+  document.getElementById("s-dot").className = cls;
+  document.getElementById("s-text").textContent = text;
+  document.getElementById("s-detail").textContent = detail;
+  vizState(cls === "idle" || cls === "error" ? "idle" :
+           cls === "listening" ? "l" : cls === "thinking" ? "t" : "s");
+}
+
+function setTx(fin, itr) {
+  const c = document.getElementById("tx-card");
+  if (!fin && !itr) {
+    c.className = "";
+    c.textContent = "Live transcript will appear here while you speak…";
+  } else {
+    c.className = "active";
+    c.innerHTML = `<span class="tx-final">${fin}</span><span class="tx-interim">${itr}</span>`;
+  }
+}
+
+function showErr(msg, ms = 4000) {
+  const t = document.getElementById("err-toast");
+  t.textContent = "⚠ " + msg;
+  t.style.display = "block";
+  setTimeout(() => t.style.display = "none", ms);
+}
+
+function updateQueueBadge() {
+  const b = document.getElementById("queue-badge");
+  if (ttsQueue.length > 0) {
+    b.textContent = ttsQueue.length + " chunk(s) queued";
+    b.style.display = "inline-block";
+  } else {
+    b.style.display = "none";
+  }
+}
+
+function addMsg(role, text) {
+  const d = document.createElement("div");
+  d.className = role === "user" ? "mu" : "ma";
+  d.innerHTML = `<div class="ml">${role === "user" ? "YOU" : "NOVA"}</div><div>${text}</div>`;
+  document.getElementById("conv").appendChild(d);
+  document.getElementById("conv").scrollTop = 1e9;
+}
+
+/* ── Silence countdown bar ────────────────────────────────── */
+function startSilBar() {
+  const w = document.getElementById("sil-wrap");
+  const b = document.getElementById("sil-bar");
+  w.style.display = "block";
+  b.style.transition = "none";
+  b.style.width = "0%";
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    b.style.transition = "width 2s linear";
+    b.style.width = "100%";
+  }));
+}
+function stopSilBar() {
+  document.getElementById("sil-wrap").style.display = "none";
+  const b = document.getElementById("sil-bar");
+  b.style.transition = "none";
+  b.style.width = "0%";
+}
+
+/* ── Speech Recognition ───────────────────────────────────── */
+function buildRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  const r = new SR();
+  r.continuous      = true;
+  r.interimResults  = true;
+  r.lang            = "en-US";
+  r.maxAlternatives = 1;
+
+  r.onstart = () => {
+    isListening = true;
+    setStatus("listening", "🎙️ Listening…", "Speak now — 2 s silence sends");
+  };
+
+  r.onend = () => {
+    isListening = false;
+    // Auto-restart unless user explicitly stopped or TTS is playing
+    if (isActive && !isSpeaking) {
+      setTimeout(() => {
+        if (isActive && !isSpeaking && !isListening) {
+          try { r.start(); } catch (_) {}
+        }
+      }, 120);
+    }
+  };
+
+  r.onerror = e => {
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    console.warn("SR error:", e.error);
+  };
+
+  r.onresult = event => {
+    // Any new speech → reset the silence timer
+    clearTimeout(silTimer);
+    stopSilBar();
+
+    let nFin = "", interim = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) nFin   += event.results[i][0].transcript;
+      else                          interim += event.results[i][0].transcript;
+    }
+    finalTx  += nFin;
+    interimTx = interim;
+
+    setTx(finalTx, interimTx);
+    setStatus("listening", "🎙️ Listening…",
+      '"' + (finalTx + interimTx).slice(-36) + (finalTx + interimTx).length > 36 ? "…" : "" + '"');
+
+    // Restart 2-second silence timer
+    startSilBar();
+    silTimer = setTimeout(async () => {
+      const full = (finalTx + interimTx).trim();
+      if (!full) return;
+      finalTx = ""; interimTx = "";
+      setTx("", "");
+      stopSilBar();
+      await processInput(full);
+    }, 2000);
+  };
+
+  return r;
+}
+
+/* ── Start / Stop listening ───────────────────────────────── */
+function startListening() {
+  if (isSpeaking || !isActive) return;
+  if (!recognition) recognition = buildRecognition();
+  if (!recognition) return;
+  if (!isListening) {
+    try { recognition.start(); } catch (_) {}
+  }
+}
+
+function stopListening(deactivate = true) {
+  clearTimeout(silTimer);
+  stopSilBar();
+  if (deactivate) isActive = false;
+  isListening = false;
+  try { recognition && recognition.abort(); } catch (_) {}
+}
+
+/* ── TTS queue ────────────────────────────────────────────── */
+function enqueueTTS(text) {
+  if (!text.trim()) return;
+  ttsQueue.push(text.trim());
+  updateQueueBadge();
+  if (!ttsPlaying) playNext();
+}
+
+function playNext() {
+  if (ttsQueue.length === 0) {
+    ttsPlaying = false;
+    isSpeaking = false;
+    document.getElementById("btn-stop-tts").style.display = "none";
+    updateQueueBadge();
+    if (isActive) {
+      startListening();
+      setStatus("listening", "🎙️ Listening…", "Your turn");
+    } else {
+      setStatus("idle", "Quick Voice paused", "");
+    }
+    return;
+  }
+  ttsPlaying = true;
+  isSpeaking = true;
+  document.getElementById("btn-stop-tts").style.display = "inline-block";
+  const chunk = ttsQueue.shift();
+  updateQueueBadge();
+
+  const utt = new SpeechSynthesisUtterance(chunk);
+  if (selectedVoice) utt.voice = selectedVoice;
+  utt.rate   = 1.05;
+  utt.pitch  = 1.0;
+  utt.volume = 1.0;
+  utt.onstart = () => {
+    setStatus("speaking", "🔊 Nova is speaking…",
+      ttsQueue.length ? `+${ttsQueue.length} more` : "");
+  };
+  utt.onend   = () => playNext();
+  utt.onerror = e => { if (e.error !== "interrupted") console.warn("TTS:", e.error); playNext(); };
+  speechSynthesis.speak(utt);
+}
+
+function stopTTS() {
+  speechSynthesis.cancel();
+  ttsQueue = [];
+  ttsPlaying = false;
+  isSpeaking = false;
+  document.getElementById("btn-stop-tts").style.display = "none";
+  updateQueueBadge();
+  if (isActive) startListening();
+}
+
+/* ── Sentence break helper ────────────────────────────────── */
+function sentenceBreak(text) {
+  const m = [...text.matchAll(/[.!?]+\s+/g)];
+  if (m.length) { const l = m[m.length - 1]; return l.index + l[0].length; }
+  return -1;
+}
+
+/* ── Core: send user text to Gemini and stream TTS ────────── */
+async function processInput(userText) {
+  stopListening(false); // pause listening but keep isActive
+  isSpeaking = true;
+
+  addMsg("user", userText);
+  setStatus("thinking", "🤔 Nova is thinking…", "");
+  history.push({ role: "user", parts: [{ text: userText }] });
+
+  let pending  = "";
+  let fullResp = "";
+  let ttsStarted = false;
+
+  try {
+    const res = await fetch(STREAM_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: SYS_PROMPT }] },
+        contents: history,
+        generationConfig: { maxOutputTokens: 800, temperature: 0.8 }
+      })
+    });
+
+    if (!res.ok) {
+      let errMsg = `HTTP ${res.status}`;
+      if (res.status === 401) errMsg = "Invalid or expired API key";
+      else if (res.status === 429) errMsg = "Rate limit exceeded - too many requests";
+      else if (res.status === 404) errMsg = "Model not found - check model name";
+      else if (res.status === 403) errMsg = "Access denied - check API key permissions";
+      throw new Error(errMsg);
+    }
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop(); // keep partial line
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ") || line.trim() === "data: [DONE]") continue;
+        try {
+          const d    = JSON.parse(line.slice(6));
+          const text = d?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!text) continue;
+
+          fullResp += text;
+          pending  += text;
+
+          // Trigger TTS when ≥10 words buffered
+          const wc = pending.trim().split(/\s+/).length;
+          if (wc >= 10) {
+            const bp = sentenceBreak(pending);
+            if (bp > 0) {
+              enqueueTTS(pending.slice(0, bp));
+              pending    = pending.slice(bp);
+              ttsStarted = true;
+            } else if (wc >= 16) {
+              enqueueTTS(pending);
+              pending    = "";
+              ttsStarted = true;
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Drain remaining buffer
+    if (pending.trim()) { enqueueTTS(pending); ttsStarted = true; }
+
+    // Save AI reply to history
+    if (fullResp) {
+      history.push({ role: "model", parts: [{ text: fullResp }] });
+      addMsg("ai", fullResp);
+    }
+
+    // Nothing queued → resume immediately
+    if (!ttsStarted) {
+      isSpeaking = false;
+      if (isActive) startListening();
+    }
+
+  } catch (err) {
+    console.error(err);
+    let errMsg = err.message || "Unknown error";
+    if (errMsg.includes("Invalid or expired")) {
+      showErr("API key invalid or expired - please reconnect");
+    } else if (errMsg.includes("Rate limit")) {
+      showErr("Rate limited - wait a moment before retrying");
+    } else if (errMsg.includes("Access denied")) {
+      showErr("Access denied - check API permissions");
+    } else {
+      showErr("AI error: " + errMsg);
+    }
+    isSpeaking = false;
+    addMsg("ai", "⚠️ Could not reach Nova. Check your API key and internet connection.");
+    if (isActive) setTimeout(startListening, 1500);
+  }
+}
+
+/* ── Toggle main button ───────────────────────────────────── */
+function toggleMain() {
+  const btn = document.getElementById("btn-toggle");
+  if (isActive) {
+    stopListening(true);
+    stopTTS();
+    setStatus("idle", "Quick Voice paused", "Press Start to resume");
+    btn.textContent = "🎙️ Start Listening";
+    btn.classList.remove("on");
+  } else {
+    isActive = true;
+    if (!recognition) recognition = buildRecognition();
+    startListening();
+    btn.textContent = "⏹ Stop";
+    btn.classList.add("on");
+  }
+}
+
+function clearConv() {
+  history = [];
+  document.getElementById("conv").innerHTML = "";
+  finalTx = ""; interimTx = "";
+  setTx("", "");
+  ttsQueue = [];
+  speechSynthesis.cancel();
+  ttsPlaying = false; isSpeaking = false;
+  updateQueueBadge();
+}
+
+/* ── Init ─────────────────────────────────────────────────── */
+setStatus("idle", "Quick Voice ready", "Press Start to begin");
+</script>
+</body>
+</html>"""
+
+
+# ══════════════════════════════════════════════════════════════
+#  MAIN ENTRY POINT
+# ══════════════════════════════════════════════════════════════
+
+def main():
+    render_sidebar()
+
+    page = st.session_state.current_page
+    if page == "api_setup":
+        render_api_setup()
+    elif page == "voice_chat":
+        if st.session_state.api_key_set:
+            render_voice_chat()
+        else:
+            st.warning("⚠️ Please set up your API key first.")
+            st.session_state.current_page = "api_setup"
+            st.rerun()
+    elif page == "quick_voice":
+        if st.session_state.api_key_set:
+            render_quick_voice()
+        else:
+            st.warning("⚠️ Please set up your API key first.")
+            st.session_state.current_page = "api_setup"
+            st.rerun()
+    elif page == "logs":
+        render_logs()
+
+
+if __name__ == "__main__":
+    main()

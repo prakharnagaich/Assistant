@@ -1,0 +1,7 @@
+ngrok http 8080
+cloud test test
+generate token
+ng rok end point creation from prakhar11102271
+configure end point on WhatsApp
+run webhook.py to establish connection
+

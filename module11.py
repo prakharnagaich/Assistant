@@ -1,0 +1,65 @@
+import os
+import streamlit as st
+from moviepy.editor import VideoFileClip
+import speech_recognition as sr
+from pydub import AudioSegment
+
+# Try to import whisper
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+
+def video_to_transcript(video_path, language='en'):
+    audio_path = 'temp_audio.wav'
+    video = VideoFileClip(video_path)
+    video.audio.write_audiofile(audio_path)
+    video.close()
+
+    # Pre-process audio: normalize and convert to mono
+    audio = AudioSegment.from_wav(audio_path)
+    audio = audio.set_channels(1)
+    audio = audio.normalize()
+    audio.export(audio_path, format="wav")
+
+    transcript = ""
+    if WHISPER_AVAILABLE:
+        model = whisper.load_model("base")
+        result = model.transcribe(audio_path, language=language)
+        transcript = result['text']
+    else:
+        recognizer = sr.Recognizer()
+        chunk_length_ms = 60 * 1000  # 1 minute chunks
+        chunks = [audio[i:i+chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
+        for i, chunk in enumerate(chunks):
+            chunk_filename = f"temp_chunk_{i}.wav"
+            chunk.export(chunk_filename, format="wav")
+            with sr.AudioFile(chunk_filename) as source:
+                audio_data = recognizer.record(source)
+                try:
+                    text = recognizer.recognize_google(audio_data, language=language)
+                except sr.UnknownValueError:
+                    text = "[Unintelligible]"
+                except sr.RequestError as e:
+                    text = f"[Error: {e}]"
+            transcript += text + "\n"
+            os.remove(chunk_filename)
+    os.remove(audio_path)
+    return transcript
+
+# Streamlit app
+st.title("MP4 Video Transcription App")
+language = st.selectbox("Select language spoken in video", ["en", "hi", "es", "fr", "de", "zh", "ja"])
+uploaded_file = st.file_uploader("Upload an MP4 video", type=["mp4"])
+if uploaded_file is not None:
+    temp_video_path = "temp_video.mp4"
+    with open(temp_video_path, "wb") as f:
+        f.write(uploaded_file.read())
+    st.info("Transcribing video. Please wait...")
+    transcript = video_to_transcript(temp_video_path, language=language)
+    st.subheader("Transcript:")
+    st.write(transcript)
+    os.remove(temp_video_path)
+
+

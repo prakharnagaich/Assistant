@@ -1,0 +1,16 @@
+"""
+Configuration file for NSE Automation App
+Copy this to config.json and modify as needed
+"""
+
+{
+  "base_dir": "C:\\Users\\Prakhar\\Desktop\\AICode",
+  "download_dir": "C:\\Users\\Prakhar\\Desktop\\AICode\\downloads",
+  "image_name": "abcd.png",
+  "prediction_file": "C:\\Users\\Prakhar\\Desktop\\AICode\\prediction.xlsx",
+  "headless": true,
+  "interval": 120,
+  "timeout": 180,
+  "page_load_wait": 5,
+  "logging_level": "INFO"
+}
